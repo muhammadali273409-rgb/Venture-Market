@@ -11,8 +11,14 @@ import { Server, Socket } from 'socket.io';
 import { AppConfiguration } from '../config/configuration';
 import { JwtPayload } from '../auth/strategies/jwt.strategy';
 
+// No `cors` option here on purpose: the actual Socket.IO server is created
+// via the custom adapter registered in main.ts (SocketIoAdapter), which
+// applies the same FRONTEND_URL-scoped CORS policy as the REST API's
+// app.enableCors() — using ConfigService there instead of process.env here
+// means it works correctly regardless of whether FRONTEND_URL comes from a
+// real environment variable (Render) or a .env file loaded by ConfigModule
+// (local dev), since decorator evaluation happens before ConfigModule runs.
 @WebSocketGateway({
-  cors: { origin: true, credentials: true },
   namespace: 'realtime',
 })
 export class NotificationsGateway implements OnGatewayConnection, OnGatewayDisconnect {

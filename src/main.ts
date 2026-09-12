@@ -1,5 +1,6 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
@@ -8,20 +9,35 @@ import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { AppConfiguration } from './config/configuration';
+import { SocketIoAdapter } from './common/adapters/socket-io.adapter';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { rawBody: true, bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    rawBody: true,
+    bufferLogs: true,
+  });
 
   const configService = app.get(ConfigService<AppConfiguration, true>);
   app.useLogger(app.get(Logger));
 
+  // Render (like Heroku/Railway) terminates TLS and proxies over HTTP to a
+  // single upstream hop. Without this, req.ip resolves to the proxy's
+  // address for every request, which both corrupts audit-log IPs and
+  // collapses per-IP rate limiting (ThrottlerGuard) into one shared bucket
+  // for all users.
+  app.set('trust proxy', 1);
+
   app.use(helmet());
   app.use(cookieParser(configService.get('auth', { infer: true }).cookieSecret));
 
+  const frontendUrl = configService.get('frontendUrl', { infer: true });
+
   app.enableCors({
-    origin: configService.get('frontendUrl', { infer: true }),
+    origin: frontendUrl,
     credentials: true,
   });
+
+  app.useWebSocketAdapter(new SocketIoAdapter(app, frontendUrl));
 
   app.setGlobalPrefix(configService.get('apiPrefix', { infer: true }));
 
