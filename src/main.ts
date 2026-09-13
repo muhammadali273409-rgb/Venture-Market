@@ -50,7 +50,11 @@ async function bootstrap(): Promise<void> {
     }),
   );
 
-  if (configService.get('nodeEnv', { infer: true }) !== 'production') {
+  const swaggerEnabled =
+    configService.get('nodeEnv', { infer: true }) !== 'production' ||
+    configService.get('enableSwagger', { infer: true });
+
+  if (swaggerEnabled) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('VentureMarket API')
       .setDescription('Marketplace for buying and selling startups — REST API')
