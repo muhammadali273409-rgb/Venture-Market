@@ -1,8 +1,9 @@
 import { EnvConfig } from './env.validation';
-
+ 
 export function buildConfiguration(env: EnvConfig) {
   return {
     nodeEnv: env.NODE_ENV,
+    enableSwagger: env.ENABLE_SWAGGER,
     port: env.PORT,
     appUrl: env.APP_URL,
     frontendUrl: env.FRONTEND_URL,
@@ -54,5 +55,5 @@ export function buildConfiguration(env: EnvConfig) {
     },
   };
 }
-
+ 
 export type AppConfiguration = ReturnType<typeof buildConfiguration>;
