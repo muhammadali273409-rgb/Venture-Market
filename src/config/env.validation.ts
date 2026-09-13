@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 export const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  ENABLE_SWAGGER: z.coerce.boolean().default(false),
   PORT: z.coerce.number().default(3000),
   APP_URL: z.string().url(),
   FRONTEND_URL: z.string().url(),
