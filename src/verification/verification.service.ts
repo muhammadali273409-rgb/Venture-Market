@@ -54,12 +54,34 @@ export class VerificationService {
     return verification;
   }
 
-  async listForBusiness(businessId: string) {
-    return this.prisma.businessVerification.findMany({
+  /**
+   * Owner and admin/moderator see full evidence (item label/value/documentId,
+   * event notes and reviewer identity). Everyone else gets only the same
+   * `{ type, status }` shape already exposed publicly on listing detail
+   * (`listings.service.ts`'s `toPublicDetail`) — private verification
+   * evidence must never leave this method for a non-owner, non-reviewer.
+   */
+  async listForBusiness(user: AuthenticatedUser, businessId: string) {
+    const business = await this.prisma.business.findUnique({ where: { id: businessId } });
+    if (!business || business.deletedAt) {
+      throw new NotFoundAppException(ErrorCode.BUSINESS_NOT_FOUND, 'Business not found');
+    }
+
+    const verifications = await this.prisma.businessVerification.findMany({
       where: { businessId },
       include: { items: true, events: { orderBy: { createdAt: 'desc' } } },
       orderBy: { createdAt: 'desc' },
     });
+
+    const canSeeEvidence =
+      business.ownerId === user.id ||
+      user.role === UserRole.ADMIN ||
+      user.role === UserRole.MODERATOR;
+    if (canSeeEvidence) {
+      return verifications;
+    }
+
+    return verifications.map((v) => ({ id: v.id, type: v.type, status: v.status }));
   }
 
   /** Admin/moderator review — never usable by the business owner on their own submission. */

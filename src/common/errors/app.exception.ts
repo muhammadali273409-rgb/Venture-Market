@@ -30,3 +30,9 @@ export class UnauthorizedAppException extends AppException {
     super(code, message, HttpStatus.UNAUTHORIZED);
   }
 }
+
+export class PaymentRequiredAppException extends AppException {
+  constructor(code: ErrorCodeValue, message: string) {
+    super(code, message, HttpStatus.PAYMENT_REQUIRED);
+  }
+}

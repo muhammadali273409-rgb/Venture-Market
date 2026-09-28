@@ -3,7 +3,6 @@ import { UserRole } from '@prisma/client';
 import { VerificationService } from './verification.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import { AuthenticatedUser } from '../auth/types/authenticated-user.type';
-import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { RolesGuard } from '../common/guards/roles.guard';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
@@ -22,10 +21,9 @@ export class VerificationController {
     return this.verificationService.submit(user, businessId, dto);
   }
 
-  @Public()
   @Get('businesses/:id/verification')
-  list(@Param('id') businessId: string) {
-    return this.verificationService.listForBusiness(businessId);
+  list(@CurrentUser() user: AuthenticatedUser, @Param('id') businessId: string) {
+    return this.verificationService.listForBusiness(user, businessId);
   }
 
   @UseGuards(RolesGuard)

@@ -52,6 +52,9 @@ export const ErrorCode = {
 
   // Webhooks
   WEBHOOK_INVALID_SIGNATURE: 'WEBHOOK_INVALID_SIGNATURE',
+
+  // Billing
+  BILLING_PAYMENT_REQUIRED: 'BILLING_PAYMENT_REQUIRED',
 } as const;
 
 export type ErrorCodeValue = (typeof ErrorCode)[keyof typeof ErrorCode];
