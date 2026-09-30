@@ -32,7 +32,12 @@ export class HttpExceptionFilter implements ExceptionFilter {
       exception instanceof Error ? exception.stack : undefined,
     );
 
+    // `statusCode`/`message` mirror Nest's default error shape so clients that
+    // read them (e.g. `message: ["website must be a URL"]`) get the real
+    // validation errors; `error` keeps the structured code for existing clients.
     response.status(status).json({
+      statusCode: status,
+      message: Array.isArray(error.details) ? error.details : error.message,
       error,
       requestId,
     });
@@ -43,7 +48,16 @@ export class HttpExceptionFilter implements ExceptionFilter {
       const status = exception.getStatus();
       const body = exception.getResponse();
 
-      if (typeof body === 'object' && body !== null && 'error' in body) {
+      // AppException bodies carry a structured `{ error: { code, message } }`.
+      // Nest's built-in exceptions also have an `error` key, but it's just the
+      // status text ("Bad Request"), so only accept an object here.
+      if (
+        typeof body === 'object' &&
+        body !== null &&
+        'error' in body &&
+        typeof (body as { error: unknown }).error === 'object' &&
+        (body as { error: unknown }).error !== null
+      ) {
         return { status, error: (body as { error: NormalizedError }).error };
       }
 
