@@ -16,8 +16,23 @@ export class ConversationsService {
     private readonly notificationsService: NotificationsService,
   ) {}
 
+  /**
+   * A conversation is always between two people with a real relationship:
+   * a buyer contacting the seller of a published business, or parties who
+   * already share an offer/negotiation or a deal. Arbitrary user IDs from the
+   * request body are never enough on their own.
+   */
   async create(user: AuthenticatedUser, dto: CreateConversationDto) {
-    const participantIds = Array.from(new Set([user.id, ...dto.participantIds]));
+    const others = Array.from(new Set(dto.participantIds)).filter((id) => id !== user.id);
+    if (others.length !== 1) {
+      throw new ForbiddenAppException(
+        ErrorCode.CONVERSATION_ACCESS_DENIED,
+        'A conversation needs exactly one other participant',
+      );
+    }
+    const [otherId] = others;
+    await this.assertRelationship(user.id, otherId, dto.businessId);
+    const participantIds = [user.id, otherId];
 
     const conversation = await this.prisma.conversation.create({
       data: {
@@ -46,7 +61,19 @@ export class ConversationsService {
     return this.prisma.conversation.findMany({
       where: { participants: { some: { userId: user.id } } },
       include: {
-        participants: { include: { user: { include: { profile: true } } } },
+        participants: {
+          include: {
+            user: {
+              select: {
+                id: true,
+                role: true,
+                profile: {
+                  select: { firstName: true, lastName: true, avatarUrl: true, company: true },
+                },
+              },
+            },
+          },
+        },
         messages: { orderBy: { createdAt: 'desc' }, take: 1 },
       },
       orderBy: { updatedAt: 'desc' },
@@ -102,6 +129,58 @@ export class ConversationsService {
     }
 
     return message;
+  }
+
+  private async assertRelationship(
+    userId: string,
+    otherId: string,
+    businessId: string | undefined,
+  ): Promise<void> {
+    if (businessId) {
+      const business = await this.prisma.business.findUnique({ where: { id: businessId } });
+      if (!business || business.deletedAt) {
+        throw new NotFoundAppException(ErrorCode.BUSINESS_NOT_FOUND, 'Business not found');
+      }
+      const involvesOwner = business.ownerId === userId || business.ownerId === otherId;
+      if (!involvesOwner) {
+        throw new ForbiddenAppException(
+          ErrorCode.CONVERSATION_ACCESS_DENIED,
+          'Conversations about a business must include its seller',
+        );
+      }
+      // Anyone may contact the seller of a live listing.
+      if (business.ownerId === otherId && business.status === 'PUBLISHED') {
+        return;
+      }
+    }
+
+    // Otherwise the two users must already share a negotiation or a deal.
+    const [negotiations, deals] = await Promise.all([
+      this.prisma.negotiation.count({
+        where: {
+          ...(businessId ? { businessId } : {}),
+          OR: [
+            { buyerId: userId, sellerId: otherId },
+            { buyerId: otherId, sellerId: userId },
+          ],
+        },
+      }),
+      this.prisma.deal.count({
+        where: {
+          ...(businessId ? { businessId } : {}),
+          AND: [
+            { participants: { some: { userId } } },
+            { participants: { some: { userId: otherId } } },
+          ],
+        },
+      }),
+    ]);
+    if (negotiations === 0 && deals === 0) {
+      throw new ForbiddenAppException(
+        ErrorCode.CONVERSATION_ACCESS_DENIED,
+        'You can only message sellers of published businesses or parties you share an offer or deal with',
+      );
+    }
   }
 
   private async assertParticipant(userId: string, conversationId: string): Promise<void> {

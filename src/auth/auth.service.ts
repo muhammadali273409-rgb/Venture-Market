@@ -64,7 +64,7 @@ export class AuthService {
         // RegisterDto.role is validated (@IsIn(['BUYER','SELLER'])) and
         // whitelisted by the global ValidationPipe — no other value, e.g.
         // "ADMIN", can ever reach this line from a client request body.
-        role: (dto.role as UserRole) ?? UserRole.SELLER,
+        role: dto.role === 'BUYER' ? UserRole.BUYER : UserRole.SELLER,
         status: AccountStatus.PENDING_VERIFICATION,
         profile: {
           create: {

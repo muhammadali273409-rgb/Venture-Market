@@ -5,10 +5,12 @@ import { createTestApp } from './utils/test-app';
 import { PrismaService } from '../src/database/prisma.service';
 
 /**
- * End-to-end coverage of the core marketplace journey:
- * seller creates + publishes a listing -> buyer offers -> seller counters ->
- * buyer accepts -> a Deal room is created transactionally. Also asserts the
- * IDOR/object-level-authorization boundaries around offers and documents.
+ * End-to-end coverage of the core marketplace journey and the buyer/seller
+ * role boundaries around it:
+ * seller creates a listing -> submits it for review -> admin approves ->
+ * buyer offers -> seller counters -> buyer accepts -> a Deal room is created
+ * -> NDA -> due diligence. Also asserts the IDOR/object-level authorization
+ * boundaries around offers, deals and documents.
  *
  * Requires a live PostgreSQL + Redis reachable via .env — point at a
  * disposable test database.
@@ -21,14 +23,17 @@ describe('Deal flow (e2e)', () => {
   const sellerEmail = `seller-${nanoid(8)}@example.com`;
   const buyerEmail = `buyer-${nanoid(8)}@example.com`;
   const outsiderEmail = `outsider-${nanoid(8)}@example.com`;
+  const adminEmail = `admin-${nanoid(8)}@example.com`;
 
   let sellerCookies: string[];
   let buyerCookies: string[];
   let outsiderCookies: string[];
+  let adminCookies: string[];
   let categoryId: string;
   let businessId: string;
   let offerId: string;
   let dealId: string;
+  let dealDocumentId: string;
 
   beforeAll(async () => {
     app = await createTestApp();
@@ -37,10 +42,14 @@ describe('Deal flow (e2e)', () => {
     await registerAndVerify(sellerEmail, 'SELLER');
     await registerAndVerify(buyerEmail, 'BUYER');
     await registerAndVerify(outsiderEmail, 'BUYER');
+    // Admins are never created through public registration — promote directly.
+    await registerAndVerify(adminEmail, 'BUYER');
+    await prisma.user.update({ where: { email: adminEmail }, data: { role: 'ADMIN' } });
 
     sellerCookies = await login(sellerEmail);
     buyerCookies = await login(buyerEmail);
     outsiderCookies = await login(outsiderEmail);
+    adminCookies = await login(adminEmail);
 
     const category = await prisma.businessCategory.upsert({
       where: { name: `E2E Category ${nanoid(4)}` },
@@ -74,6 +83,22 @@ describe('Deal flow (e2e)', () => {
     return res.headers['set-cookie'] as unknown as string[];
   }
 
+  it('public registration cannot create an admin', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({ email: `sneaky-${nanoid(8)}@example.com`, password, role: 'ADMIN' })
+      .expect(400);
+  });
+
+  it('a buyer cannot create a business', async () => {
+    const res = await request(app.getHttpServer())
+      .post('/api/v1/businesses')
+      .set('Cookie', buyerCookies)
+      .send({ name: 'Not allowed' })
+      .expect(403);
+    expect(res.body.error.code).toBe('AUTH_FORBIDDEN');
+  });
+
   it('seller creates a business', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/v1/businesses')
@@ -103,7 +128,7 @@ describe('Deal flow (e2e)', () => {
     expect(res.body.error.code).toBe('BUSINESS_NOT_FOUND');
   });
 
-  it('seller sets an asking price and publishes the listing', async () => {
+  it('seller sets an asking price and submits the listing for review — it is not live yet', async () => {
     await request(app.getHttpServer())
       .patch(`/api/v1/businesses/${businessId}/listing`)
       .set('Cookie', sellerCookies)
@@ -111,36 +136,66 @@ describe('Deal flow (e2e)', () => {
       .expect(200);
 
     const res = await request(app.getHttpServer())
-      .post(`/api/v1/businesses/${businessId}/publish`)
+      .post(`/api/v1/businesses/${businessId}/submit-review`)
       .set('Cookie', sellerCookies)
       .expect(201);
 
-    expect(res.body.data.status).toBe('PUBLISHED');
+    expect(res.body.data.status).toBe('PENDING_REVIEW');
+    await request(app.getHttpServer()).get(`/api/v1/listings/${businessId}`).expect(404);
   });
 
-  it('the business now appears in public search', async () => {
+  it('seller cannot edit the listing while it is under review', async () => {
+    const res = await request(app.getHttpServer())
+      .patch(`/api/v1/businesses/${businessId}/listing`)
+      .set('Cookie', sellerCookies)
+      .send({ askingPrice: 1 })
+      .expect(409);
+    expect(res.body.error.code).toBe('BUSINESS_LOCKED');
+  });
+
+  it('seller cannot approve their own business', async () => {
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/businesses/${businessId}/approve`)
+      .set('Cookie', sellerCookies)
+      .expect(403);
+  });
+
+  it('an admin approves the business and it appears in public search', async () => {
+    await request(app.getHttpServer())
+      .post(`/api/v1/admin/businesses/${businessId}/approve`)
+      .set('Cookie', adminCookies)
+      .expect(201);
+
     const res = await request(app.getHttpServer()).get('/api/v1/listings').expect(200);
     expect(res.body.data.some((item: { id: string }) => item.id === businessId)).toBe(true);
   });
 
-  it('seller cannot make an offer on their own business', async () => {
+  it('a seller account cannot make offers', async () => {
     const res = await request(app.getHttpServer())
       .post(`/api/v1/businesses/${businessId}/offers`)
       .set('Cookie', sellerCookies)
       .send({ amount: 40000 })
       .expect(403);
-    expect(res.body.error.code).toBe('OFFER_NOT_ALLOWED');
+    expect(res.body.error.code).toBe('AUTH_FORBIDDEN');
   });
 
   it('buyer submits an offer', async () => {
     const res = await request(app.getHttpServer())
       .post(`/api/v1/businesses/${businessId}/offers`)
       .set('Cookie', buyerCookies)
-      .send({ amount: 40000, terms: 'Cash, 30-day close' })
+      .send({ amount: 40000, terms: 'Cash, 30-day close', message: 'Keen to move fast' })
       .expect(201);
 
     offerId = res.body.data.id;
     expect(res.body.data.status).toBe('SUBMITTED');
+  });
+
+  it('buyer cannot stack a second open offer on the same business', async () => {
+    await request(app.getHttpServer())
+      .post(`/api/v1/businesses/${businessId}/offers`)
+      .set('Cookie', buyerCookies)
+      .send({ amount: 41000 })
+      .expect(409);
   });
 
   it('an outsider cannot read the offer (IDOR check)', async () => {
@@ -174,10 +229,10 @@ describe('Deal flow (e2e)', () => {
 
     offerId = res.body.data.id; // counter creates a new Offer row in the chain
     expect(res.body.data.status).toBe('SUBMITTED');
-    expect(res.body.data.amountMinor).toBe('4600000');
+    expect(res.body.data.amount).toBe(46000);
   });
 
-  it('buyer accepts the counter — a Deal is created transactionally', async () => {
+  it('buyer accepts the counter — a Deal is created and the listing is paused, not sold', async () => {
     const res = await request(app.getHttpServer())
       .post(`/api/v1/offers/${offerId}/accept`)
       .set('Cookie', buyerCookies)
@@ -187,7 +242,7 @@ describe('Deal flow (e2e)', () => {
     expect(res.body.data.status).toBe('INITIATED');
 
     const business = await prisma.business.findUniqueOrThrow({ where: { id: businessId } });
-    expect(business.status).toBe('SOLD');
+    expect(business.status).toBe('PAUSED');
   });
 
   it('a second accept attempt on the same offer fails (no double-accept race)', async () => {
@@ -198,14 +253,22 @@ describe('Deal flow (e2e)', () => {
     expect(res.body.error.code).toBe('OFFER_ALREADY_ACCEPTED');
   });
 
+  it('seller cannot relist the business while the deal is active', async () => {
+    const res = await request(app.getHttpServer())
+      .post(`/api/v1/businesses/${businessId}/resume`)
+      .set('Cookie', sellerCookies)
+      .expect(409);
+    expect(res.body.error.code).toBe('BUSINESS_LOCKED');
+  });
+
   it('an outsider cannot read the deal room (IDOR check)', async () => {
     await request(app.getHttpServer())
       .get(`/api/v1/deals/${dealId}`)
       .set('Cookie', outsiderCookies)
-      .expect(404);
+      .expect(403);
   });
 
-  it('both deal participants can read the deal room', async () => {
+  it('both deal participants can read the deal room, without private user fields', async () => {
     const asBuyer = await request(app.getHttpServer())
       .get(`/api/v1/deals/${dealId}`)
       .set('Cookie', buyerCookies)
@@ -217,9 +280,30 @@ describe('Deal flow (e2e)', () => {
 
     expect(asBuyer.body.data.participants).toHaveLength(2);
     expect(asSeller.body.data.participants).toHaveLength(2);
+    for (const participant of asBuyer.body.data.participants) {
+      expect(participant.user.passwordHash).toBeUndefined();
+      expect(participant.user.email).toBeUndefined();
+    }
   });
 
-  it('a private document uploaded to the deal is not accessible to an outsider', async () => {
+  it('a party cannot skip protected deal stages', async () => {
+    await request(app.getHttpServer())
+      .patch(`/api/v1/deals/${dealId}/status`)
+      .set('Cookie', sellerCookies)
+      .send({ status: 'COMPLETED' })
+      .expect(409);
+  });
+
+  it('a seller cannot re-role the buyer through the participants endpoint', async () => {
+    const buyer = await prisma.user.findUniqueOrThrow({ where: { email: buyerEmail } });
+    await request(app.getHttpServer())
+      .post(`/api/v1/deals/${dealId}/participants`)
+      .set('Cookie', sellerCookies)
+      .send({ userId: buyer.id, role: 'ACCOUNTANT' })
+      .expect(409);
+  });
+
+  it('a deal document is hidden from the buyer until the NDA is signed', async () => {
     const uploadRes = await request(app.getHttpServer())
       .post(`/api/v1/businesses/${businessId}/documents`)
       .set('Cookie', sellerCookies)
@@ -230,18 +314,68 @@ describe('Deal flow (e2e)', () => {
         contentType: 'text/plain',
       })
       .expect(201);
-
-    const documentId = uploadRes.body.data.id;
+    dealDocumentId = uploadRes.body.data.id;
 
     await request(app.getHttpServer())
-      .get(`/api/v1/documents/${documentId}/download`)
+      .get(`/api/v1/documents/${dealDocumentId}/download`)
       .set('Cookie', outsiderCookies)
       .expect(403);
+    await request(app.getHttpServer())
+      .get(`/api/v1/documents/${dealDocumentId}/download`)
+      .set('Cookie', buyerCookies)
+      .expect(403);
+  });
 
+  it('both parties sign the NDA and due diligence opens automatically', async () => {
+    await request(app.getHttpServer())
+      .patch(`/api/v1/deals/${dealId}/status`)
+      .set('Cookie', buyerCookies)
+      .send({ status: 'NDA' })
+      .expect(200);
+
+    await request(app.getHttpServer())
+      .post(`/api/v1/deals/${dealId}/nda/sign`)
+      .set('Cookie', buyerCookies)
+      .expect(201);
+    const res = await request(app.getHttpServer())
+      .post(`/api/v1/deals/${dealId}/nda/sign`)
+      .set('Cookie', sellerCookies)
+      .expect(201);
+
+    expect(res.body.data.status).toBe('DUE_DILIGENCE');
+  });
+
+  it('after the NDA the buyer can download the deal document; the outsider still cannot', async () => {
     const asBuyer = await request(app.getHttpServer())
-      .get(`/api/v1/documents/${documentId}/download`)
+      .get(`/api/v1/documents/${dealDocumentId}/download`)
       .set('Cookie', buyerCookies)
       .expect(200);
     expect(asBuyer.body.data.url).toBeDefined();
+
+    await request(app.getHttpServer())
+      .get(`/api/v1/documents/${dealDocumentId}/download`)
+      .set('Cookie', outsiderCookies)
+      .expect(403);
+  });
+
+  it('only the buyer requests due diligence; the seller cannot approve items', async () => {
+    await request(app.getHttpServer())
+      .post(`/api/v1/deals/${dealId}/due-diligence`)
+      .set('Cookie', sellerCookies)
+      .send({ category: 'FINANCIAL', title: 'P&L', items: ['Last 12 months P&L'] })
+      .expect(403);
+
+    const created = await request(app.getHttpServer())
+      .post(`/api/v1/deals/${dealId}/due-diligence`)
+      .set('Cookie', buyerCookies)
+      .send({ category: 'FINANCIAL', title: 'P&L', items: ['Last 12 months P&L'] })
+      .expect(201);
+    const itemId = created.body.data.items[0].id;
+
+    await request(app.getHttpServer())
+      .patch(`/api/v1/deals/${dealId}/due-diligence/items/${itemId}`)
+      .set('Cookie', sellerCookies)
+      .send({ status: 'APPROVED' })
+      .expect(403);
   });
 });

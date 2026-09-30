@@ -34,6 +34,34 @@ describe('Auth (e2e)', () => {
     expect(res.body.data.status).toBe('PENDING_VERIFICATION');
   });
 
+  it('stores the chosen public role on the new account', async () => {
+    const user = await app.get(PrismaService).user.findUniqueOrThrow({ where: { email } });
+    expect(user.role).toBe('BUYER');
+  });
+
+  it('rejects registration without a Buyer/Seller choice', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({ email: `no-role-${nanoid(8)}@example.com`, password })
+      .expect(400);
+  });
+
+  it('rejects ADMIN (or any non-public role) at public registration', async () => {
+    for (const role of ['ADMIN', 'MODERATOR', 'BUYER_SELLER', 'admin']) {
+      await request(app.getHttpServer())
+        .post('/api/v1/auth/register')
+        .send({ email: `role-${nanoid(8)}@example.com`, password, role })
+        .expect(400);
+    }
+  });
+
+  it('rejects extra privileged fields smuggled into the register body', async () => {
+    await request(app.getHttpServer())
+      .post('/api/v1/auth/register')
+      .send({ email: `extra-${nanoid(8)}@example.com`, password, role: 'BUYER', status: 'ACTIVE' })
+      .expect(400);
+  });
+
   it('rejects registering the same email twice', async () => {
     const res = await request(app.getHttpServer())
       .post('/api/v1/auth/register')

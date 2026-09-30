@@ -10,6 +10,8 @@ const TYPES: VerificationType[] = [
   'TRAFFIC',
   'FINANCIAL',
   'DOMAIN',
+  'ANALYTICS',
+  'CUSTOMERS',
 ];
 
 class VerificationItemInput {

@@ -13,14 +13,12 @@ const METRIC_TYPES: MetricType[] = [
   'TRAFFIC',
 ];
 
-const METRIC_SOURCES: MetricSource[] = [
-  'SELLER_PROVIDED',
-  'STRIPE',
-  'PADDLE',
-  'SHOPIFY',
-  'ACCOUNTING',
-  'ADMIN_VERIFIED',
-];
+/**
+ * A seller can only self-report. Integration-backed and ADMIN_VERIFIED
+ * sources are written by integrations / the verification workflow, never
+ * accepted from the request body.
+ */
+const METRIC_SOURCES: MetricSource[] = ['SELLER_PROVIDED'];
 
 export class CreateMetricDto {
   @IsIn(METRIC_TYPES)

@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { DealStatus, Prisma, UserRole } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { AuditService } from '../common/audit/audit.service';
@@ -24,6 +24,19 @@ const ALLOWED_MIME_TYPES = new Set([
 ]);
 
 const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Deal documents open up to the other side only once the NDA is signed
+ * (DUE_DILIGENCE onwards), and close again if the deal is cancelled.
+ */
+const DEAL_DOCUMENTS_VISIBLE_STATUSES: DealStatus[] = [
+  'DUE_DILIGENCE',
+  'AGREEMENT',
+  'TRANSACTION',
+  'TRANSFER',
+  'COMPLETED',
+  'DISPUTED',
+];
 
 export interface UploadedFilePayload {
   originalname: string;
@@ -68,6 +81,21 @@ export class DocumentsService {
 
     if (dto.dealId) {
       await this.assertDealParticipant(user.id, dto.dealId);
+      const deal = await this.prisma.deal.findUnique({ where: { id: dto.dealId } });
+      // The deal must be about *this* business — otherwise a buyer in one
+      // deal could attach files to any other seller's business.
+      if (!deal || deal.businessId !== businessId) {
+        throw new ForbiddenAppException(
+          ErrorCode.DEAL_ACCESS_DENIED,
+          'This deal is not about this business',
+        );
+      }
+      if (deal.status === 'COMPLETED' || deal.status === 'CANCELLED') {
+        throw new ForbiddenAppException(
+          ErrorCode.DEAL_ACCESS_DENIED,
+          'Documents cannot be added to a closed deal',
+        );
+      }
     } else if (business.ownerId !== user.id && user.role !== UserRole.ADMIN) {
       throw new ForbiddenAppException(
         ErrorCode.BUSINESS_ACCESS_DENIED,
@@ -88,7 +116,8 @@ export class DocumentsService {
         size: file.size,
         storageKey,
         category: dto.category ?? 'OTHER',
-        visibility: dto.visibility ?? 'PRIVATE',
+        // A file uploaded into a deal is meant for the deal unless marked otherwise.
+        visibility: dto.visibility ?? (dto.dealId ? 'DEAL_PARTICIPANTS' : 'PRIVATE'),
       },
     });
 
@@ -202,8 +231,16 @@ export class DocumentsService {
           : {
               OR: [
                 { uploadedById: user.id },
-                { accessGrants: { some: { granteeId: user.id, revokedAt: null } } },
-                { deal: { participants: { some: { userId: user.id } } } },
+                {
+                  accessGrants: {
+                    some: {
+                      granteeId: user.id,
+                      revokedAt: null,
+                      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+                    },
+                  },
+                },
+                this.dealDocumentFilter(user.id),
               ],
             }),
       },
@@ -225,7 +262,10 @@ export class DocumentsService {
     const isUploader = document.uploadedById === user.id;
     const isAdmin = user.role === UserRole.ADMIN;
     const isDealParticipant =
-      document.deal?.participants.some((p) => p.userId === user.id) ?? false;
+      !!document.deal &&
+      document.visibility !== 'PRIVATE' &&
+      DEAL_DOCUMENTS_VISIBLE_STATUSES.includes(document.deal.status) &&
+      document.deal.participants.some((p) => p.userId === user.id);
     const hasExplicitGrant = document.accessGrants.some(
       (grant) =>
         grant.granteeId === user.id &&
@@ -241,6 +281,17 @@ export class DocumentsService {
     }
 
     return document;
+  }
+
+  /** Prisma mirror of the deal-participant rule in getAccessibleDocument. */
+  private dealDocumentFilter(userId: string): Prisma.BusinessDocumentWhereInput {
+    return {
+      visibility: { not: 'PRIVATE' },
+      deal: {
+        status: { in: DEAL_DOCUMENTS_VISIBLE_STATUSES },
+        participants: { some: { userId } },
+      },
+    };
   }
 
   private async assertDealParticipant(userId: string, dealId: string): Promise<void> {

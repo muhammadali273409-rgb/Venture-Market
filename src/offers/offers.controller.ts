@@ -1,4 +1,7 @@
-import { Body, Controller, Get, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Roles } from '../common/decorators/roles.decorator';
+import { RolesGuard } from '../common/guards/roles.guard';
+import { BUYER_ROLES } from '../common/constants/roles';
 import { Throttle } from '@nestjs/throttler';
 import { OffersService } from './offers.service';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
@@ -6,11 +9,19 @@ import { AuthenticatedUser } from '../auth/types/authenticated-user.type';
 import { CreateOfferDto } from './dto/create-offer.dto';
 import { CounterOfferDto } from './dto/counter-offer.dto';
 
+/**
+ * Only buyer accounts open a negotiation (POST businesses/:id/offers). The
+ * follow-up actions are open to either party, but the service decides which
+ * side may do what from the offer itself (buyerId/sellerId/createdById) —
+ * never from the request.
+ */
 @Throttle({ default: { limit: 30, ttl: 60_000 } })
 @Controller()
 export class OffersController {
   constructor(private readonly offersService: OffersService) {}
 
+  @UseGuards(RolesGuard)
+  @Roles(...BUYER_ROLES)
   @Post('businesses/:id/offers')
   create(
     @CurrentUser() user: AuthenticatedUser,

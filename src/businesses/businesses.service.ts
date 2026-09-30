@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { Business, BusinessStatus, ListingStatus, UserRole } from '@prisma/client';
+import { Business, BusinessStatus, DealStatus, ListingStatus, UserRole } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../common/audit/audit.service';
 import { QUEUE_NAMES, DEFAULT_JOB_OPTIONS } from '../jobs/queue.constants';
@@ -25,12 +25,38 @@ const businessStateMachine = new StateMachine<BusinessStatus>({
   DRAFT: ['PENDING_REVIEW', 'ARCHIVED'],
   PENDING_REVIEW: ['PUBLISHED', 'REJECTED', 'DRAFT'],
   PUBLISHED: ['PAUSED', 'SOLD', 'SUSPENDED', 'ARCHIVED'],
-  PAUSED: ['PUBLISHED', 'ARCHIVED'],
-  REJECTED: ['DRAFT'],
+  // PAUSED -> SOLD: an accepted offer pauses the listing while the deal runs; completing the deal sells it.
+  PAUSED: ['PUBLISHED', 'SOLD', 'ARCHIVED'],
+  // A rejected listing can be fixed and resubmitted directly.
+  REJECTED: ['DRAFT', 'PENDING_REVIEW'],
   SUSPENDED: ['PUBLISHED', 'ARCHIVED'],
   SOLD: ['ARCHIVED'],
   ARCHIVED: [],
 });
+
+/** Statuses in which the seller may no longer edit listing content or financials. */
+const LOCKED_BUSINESS_STATUSES: BusinessStatus[] = [
+  BusinessStatus.PENDING_REVIEW,
+  BusinessStatus.SOLD,
+  BusinessStatus.SUSPENDED,
+  BusinessStatus.ARCHIVED,
+];
+
+/** Only never-approved businesses can be deleted by their seller. */
+const DELETABLE_BUSINESS_STATUSES: BusinessStatus[] = [
+  BusinessStatus.DRAFT,
+  BusinessStatus.REJECTED,
+];
+
+export const ACTIVE_DEAL_STATUSES: DealStatus[] = [
+  DealStatus.INITIATED,
+  DealStatus.NDA,
+  DealStatus.DUE_DILIGENCE,
+  DealStatus.AGREEMENT,
+  DealStatus.TRANSACTION,
+  DealStatus.TRANSFER,
+  DealStatus.DISPUTED,
+];
 
 const REQUIRED_LISTING_FIELDS = [
   'name',
@@ -148,6 +174,7 @@ export class BusinessesService {
 
   async update(user: AuthenticatedUser, id: string, dto: UpdateBusinessDto) {
     const business = await this.findOwned(user, id);
+    await this.assertEditable(business);
     return this.prisma.business.update({
       where: { id: business.id },
       data: {
@@ -164,6 +191,12 @@ export class BusinessesService {
 
   async softDelete(user: AuthenticatedUser, id: string) {
     const business = await this.findOwned(user, id);
+    if (!DELETABLE_BUSINESS_STATUSES.includes(business.status)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_INVALID_STATE_TRANSITION,
+        'Only draft or rejected businesses can be deleted — pause or archive a published listing instead',
+      );
+    }
     await this.prisma.business.update({
       where: { id: business.id },
       data: { deletedAt: new Date() },
@@ -179,6 +212,7 @@ export class BusinessesService {
 
   async addMetric(user: AuthenticatedUser, businessId: string, dto: CreateMetricDto) {
     const business = await this.findOwned(user, businessId);
+    await this.assertEditable(business);
     const metric = await this.prisma.businessMetric.create({
       data: {
         businessId: business.id,
@@ -186,7 +220,7 @@ export class BusinessesService {
         valueMinor: toMinorUnits(dto.value),
         currency: dto.currency ?? 'USD',
         period: new Date(dto.period),
-        source: dto.source ?? 'SELLER_PROVIDED',
+        source: 'SELLER_PROVIDED',
         verificationStatus: 'UNVERIFIED',
       },
     });
@@ -195,6 +229,7 @@ export class BusinessesService {
 
   async updateListing(user: AuthenticatedUser, businessId: string, dto: UpdateListingDto) {
     const business = await this.findOwned(user, businessId);
+    await this.assertEditable(business);
     const listing = await this.prisma.businessListing.update({
       where: { businessId: business.id },
       data: {
@@ -207,9 +242,14 @@ export class BusinessesService {
     return this.serializeListing(listing);
   }
 
-  async publish(user: AuthenticatedUser, businessId: string) {
+  /**
+   * Seller submits a DRAFT (or a fixed REJECTED) business for admin review.
+   * Going live is exclusively AdminService.approveBusiness's job — a seller
+   * can never move their own business to PUBLISHED from here.
+   */
+  async submitForReview(user: AuthenticatedUser, businessId: string) {
     const business = await this.findOwned(user, businessId);
-    businessStateMachine.assertTransition(business.status, BusinessStatus.PENDING_REVIEW);
+    this.assertTransition(business.status, BusinessStatus.PENDING_REVIEW);
 
     const completeness = this.calculateCompleteness(business);
     if (completeness.score < 100) {
@@ -222,26 +262,92 @@ export class BusinessesService {
     const [updatedBusiness] = await this.prisma.$transaction([
       this.prisma.business.update({
         where: { id: business.id },
-        data: { status: BusinessStatus.PUBLISHED },
+        data: { status: BusinessStatus.PENDING_REVIEW },
       }),
       this.prisma.businessListing.update({
         where: { businessId: business.id },
-        data: {
-          status: ListingStatus.PUBLISHED,
-          publishedAt: new Date(),
-          completenessScore: completeness.score,
-        },
+        data: { status: ListingStatus.PENDING_REVIEW, completenessScore: completeness.score },
       }),
     ]);
 
     await this.auditService.record({
       userId: user.id,
-      action: 'BUSINESS_PUBLISHED',
+      action: 'BUSINESS_SUBMITTED_FOR_REVIEW',
       targetType: 'Business',
       targetId: business.id,
     });
 
-    // Matching against saved searches runs asynchronously — never block the publish request on it.
+    return updatedBusiness;
+  }
+
+  /** Seller pulls a PENDING_REVIEW submission back to DRAFT to keep editing. */
+  async withdrawSubmission(user: AuthenticatedUser, businessId: string) {
+    const business = await this.findOwned(user, businessId);
+    if (business.status !== BusinessStatus.PENDING_REVIEW) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_INVALID_STATE_TRANSITION,
+        'Only a business that is pending review can be withdrawn',
+      );
+    }
+
+    const [updatedBusiness] = await this.prisma.$transaction([
+      this.prisma.business.update({
+        where: { id: business.id },
+        data: { status: BusinessStatus.DRAFT },
+      }),
+      this.prisma.businessListing.update({
+        where: { businessId: business.id },
+        data: { status: ListingStatus.DRAFT },
+      }),
+    ]);
+
+    await this.auditService.record({
+      userId: user.id,
+      action: 'BUSINESS_SUBMISSION_WITHDRAWN',
+      targetType: 'Business',
+      targetId: business.id,
+    });
+
+    return updatedBusiness;
+  }
+
+  /**
+   * Resume a PAUSED listing. It was already approved, so it goes straight
+   * back to PUBLISHED — unless a deal on it is still running.
+   */
+  async resume(user: AuthenticatedUser, businessId: string) {
+    const business = await this.findOwned(user, businessId);
+    if (business.status !== BusinessStatus.PAUSED) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_INVALID_STATE_TRANSITION,
+        'Only a paused listing can be resumed',
+      );
+    }
+    if (await this.hasActiveDeal(business.id)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_LOCKED,
+        'This business has an active deal and cannot be relisted',
+      );
+    }
+
+    const [updatedBusiness] = await this.prisma.$transaction([
+      this.prisma.business.update({
+        where: { id: business.id },
+        data: { status: BusinessStatus.PUBLISHED },
+      }),
+      this.prisma.businessListing.update({
+        where: { businessId: business.id },
+        data: { status: ListingStatus.PUBLISHED },
+      }),
+    ]);
+
+    await this.auditService.record({
+      userId: user.id,
+      action: 'BUSINESS_RESUMED',
+      targetType: 'Business',
+      targetId: business.id,
+    });
+
     await this.savedSearchQueue.add(
       'match-saved-searches',
       { businessId: business.id },
@@ -253,7 +359,7 @@ export class BusinessesService {
 
   async unpublish(user: AuthenticatedUser, businessId: string) {
     const business = await this.findOwned(user, businessId);
-    businessStateMachine.assertTransition(business.status, BusinessStatus.PAUSED);
+    this.assertTransition(business.status, BusinessStatus.PAUSED);
 
     const [updatedBusiness] = await this.prisma.$transaction([
       this.prisma.business.update({
@@ -274,6 +380,42 @@ export class BusinessesService {
     });
 
     return updatedBusiness;
+  }
+
+  private assertTransition(from: BusinessStatus, to: BusinessStatus): void {
+    if (!businessStateMachine.canTransition(from, to)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_INVALID_STATE_TRANSITION,
+        `Cannot move a business from ${from} to ${to}`,
+      );
+    }
+  }
+
+  /**
+   * Listing content and financials are frozen while under review, once sold
+   * or suspended, and for the whole life of an active deal — the buyer is
+   * doing due diligence on exactly these numbers.
+   */
+  private async assertEditable(business: { id: string; status: BusinessStatus }): Promise<void> {
+    if (LOCKED_BUSINESS_STATUSES.includes(business.status)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_LOCKED,
+        `This business cannot be edited while it is ${business.status}`,
+      );
+    }
+    if (await this.hasActiveDeal(business.id)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_LOCKED,
+        'This business cannot be edited while a deal on it is in progress',
+      );
+    }
+  }
+
+  private async hasActiveDeal(businessId: string): Promise<boolean> {
+    const count = await this.prisma.deal.count({
+      where: { businessId, status: { in: ACTIVE_DEAL_STATUSES } },
+    });
+    return count > 0;
   }
 
   private canManage(user: AuthenticatedUser, business: Business): boolean {

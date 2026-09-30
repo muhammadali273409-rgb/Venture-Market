@@ -94,6 +94,8 @@ enum VerificationType {
   TRAFFIC
   FINANCIAL
   DOMAIN
+  ANALYTICS
+  CUSTOMERS
 }
 
 enum VerificationStatus {
@@ -719,6 +721,8 @@ model Offer {
   amountMinor    BigInt
   currency       String       @default("USD")
   terms          String?
+  message        String?
+  expiresAt      DateTime?
   status         OfferStatus  @default(DRAFT)
   createdById    String
   submittedAt    DateTime?
@@ -830,6 +834,8 @@ model Deal {
   buyerId          String
   sellerId         String
   status           DealStatus @default(INITIATED)
+  sellerTransferConfirmedAt DateTime?
+  buyerReceiptConfirmedAt   DateTime?
   createdAt        DateTime   @default(now())
   updatedAt        DateTime   @updatedAt
 
@@ -854,6 +860,7 @@ model DealParticipant {
   user      User                @relation(fields: [userId], references: [id])
   role      DealParticipantRole
   ndaStatus NdaStatus           @default(NOT_REQUIRED)
+  ndaSignedAt DateTime?
   createdAt DateTime            @default(now())
 
   @@unique([dealId, userId])

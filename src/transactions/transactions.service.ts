@@ -15,7 +15,12 @@ export class TransactionsService {
   ) {}
 
   async create(user: AuthenticatedUser, dealId: string, dto: CreateTransactionDto) {
-    await this.dealsService.assertParticipant(user.id, dealId);
+    await this.dealsService.assertParticipantRole(
+      user.id,
+      dealId,
+      ['BUYER'],
+      'Only the buyer starts the payment',
+    );
 
     const deal = await this.prisma.deal.findUniqueOrThrow({
       where: { id: dealId },
@@ -86,6 +91,17 @@ export class TransactionsService {
       await this.dealsService.addTimelineEvent(transaction.dealId, 'TRANSACTION_COMPLETED', null, {
         transactionId: transaction.id,
       });
+      // Payment confirmed by the provider is the only way into TRANSFER.
+      const deal = await this.prisma.deal.findUnique({ where: { id: transaction.dealId } });
+      if (deal?.status === 'TRANSACTION') {
+        await this.dealsService.transition(deal.id, 'TRANSACTION', 'TRANSFER', null);
+      }
+    } else {
+      await this.dealsService.notifyParticipants(
+        transaction.dealId,
+        null,
+        `Payment status: ${status}`,
+      );
     }
   }
 }

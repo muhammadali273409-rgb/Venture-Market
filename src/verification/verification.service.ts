@@ -1,18 +1,27 @@
 import { Injectable } from '@nestjs/common';
-import { UserRole } from '@prisma/client';
+import { UserRole, VerificationStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../common/audit/audit.service';
+import { NotificationsService } from '../notifications/notifications.service';
 import { AuthenticatedUser } from '../auth/types/authenticated-user.type';
 import { ErrorCode } from '../common/constants/error-codes';
-import { ForbiddenAppException, NotFoundAppException } from '../common/errors/app.exception';
+import {
+  ConflictAppException,
+  ForbiddenAppException,
+  NotFoundAppException,
+} from '../common/errors/app.exception';
 import { SubmitVerificationDto } from './dto/submit-verification.dto';
 import { ReviewVerificationDto } from './dto/review-verification.dto';
+
+/** A decision is final; a rejected seller submits a fresh verification. */
+const REVIEWABLE_STATUSES: VerificationStatus[] = ['PENDING', 'IN_REVIEW'];
 
 @Injectable()
 export class VerificationService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async submit(user: AuthenticatedUser, businessId: string, dto: SubmitVerificationDto) {
@@ -25,6 +34,22 @@ export class VerificationService {
         ErrorCode.BUSINESS_ACCESS_DENIED,
         'Only the business owner can submit verification',
       );
+    }
+
+    // Evidence may only reference this business's own documents.
+    const documentIds = (dto.items ?? [])
+      .map((i) => i.documentId)
+      .filter((id): id is string => !!id);
+    if (documentIds.length) {
+      const owned = await this.prisma.businessDocument.count({
+        where: { id: { in: documentIds }, businessId, deletedAt: null },
+      });
+      if (owned !== new Set(documentIds).size) {
+        throw new NotFoundAppException(
+          ErrorCode.DOCUMENT_NOT_FOUND,
+          'Evidence documents must belong to this business',
+        );
+      }
     }
 
     const verification = await this.prisma.businessVerification.create({
@@ -88,9 +113,22 @@ export class VerificationService {
   async review(reviewer: AuthenticatedUser, verificationId: string, dto: ReviewVerificationDto) {
     const verification = await this.prisma.businessVerification.findUnique({
       where: { id: verificationId },
+      include: { business: { select: { ownerId: true, name: true } } },
     });
     if (!verification) {
       throw new NotFoundAppException(ErrorCode.NOT_FOUND, 'Verification not found');
+    }
+    if (verification.business.ownerId === reviewer.id) {
+      throw new ForbiddenAppException(
+        ErrorCode.AUTH_FORBIDDEN,
+        'You cannot review a verification for your own business',
+      );
+    }
+    if (!REVIEWABLE_STATUSES.includes(verification.status)) {
+      throw new ConflictAppException(
+        ErrorCode.CONFLICT,
+        `A ${verification.status} verification can no longer be reviewed — the seller must resubmit`,
+      );
     }
 
     const updated = await this.prisma.businessVerification.update({
@@ -107,6 +145,14 @@ export class VerificationService {
       targetType: 'BusinessVerification',
       targetId: verificationId,
       metadata: { status: dto.status },
+    });
+
+    await this.notificationsService.create({
+      userId: verification.business.ownerId,
+      type: 'VERIFICATION_UPDATE',
+      title: `${verification.type} verification for ${verification.business.name}: ${dto.status}`,
+      body: dto.note,
+      metadata: { businessId: verification.businessId, verificationId },
     });
 
     return updated;

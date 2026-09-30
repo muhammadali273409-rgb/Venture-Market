@@ -50,12 +50,23 @@ export class OffersService {
         'You cannot make an offer on your own business',
       );
     }
+    const expiresAt = this.parseExpiry(dto.expiresAt);
 
     let negotiation = await this.prisma.negotiation.findFirst({
       where: { businessId, buyerId: user.id, status: NegotiationStatus.OPEN },
     });
 
-    if (!negotiation) {
+    if (negotiation) {
+      const openOffer = await this.prisma.offer.findFirst({
+        where: { negotiationId: negotiation.id, status: { in: OPEN_OFFER_STATUSES } },
+      });
+      if (openOffer) {
+        throw new ConflictAppException(
+          ErrorCode.OFFER_NOT_ALLOWED,
+          'You already have an open offer on this business — respond to it or withdraw it first',
+        );
+      }
+    } else {
       negotiation = await this.prisma.negotiation.create({
         data: {
           businessId,
@@ -67,6 +78,7 @@ export class OffersService {
     }
 
     const amountMinor = toMinorUnits(dto.amount);
+    const currency = dto.currency ?? business.listing?.currency ?? 'USD';
 
     const offer = await this.prisma.offer.create({
       data: {
@@ -75,15 +87,17 @@ export class OffersService {
         buyerId: user.id,
         sellerId: business.ownerId,
         amountMinor,
-        currency: dto.currency ?? business.listing?.currency ?? 'USD',
+        currency,
         terms: dto.terms,
+        message: dto.message,
+        expiresAt,
         status: OfferStatus.SUBMITTED,
         createdById: user.id,
         submittedAt: new Date(),
         revisions: {
           create: {
             amountMinor,
-            currency: dto.currency ?? 'USD',
+            currency,
             terms: dto.terms,
             status: OfferStatus.SUBMITTED,
             submittedById: user.id,
@@ -104,6 +118,7 @@ export class OffersService {
       action: 'OFFER_CREATED',
       targetType: 'Offer',
       targetId: offer.id,
+      metadata: { businessId, amount: dto.amount, currency },
     });
 
     return this.serializeOffer(offer);
@@ -163,16 +178,25 @@ export class OffersService {
         'Wait for the other party to respond',
       );
     }
+    await this.assertNotExpired(parent);
+    const expiresAt = this.parseExpiry(dto.expiresAt);
 
     const amountMinor = toMinorUnits(dto.amount);
     const counterpartyId = user.id === parent.buyerId ? parent.sellerId : parent.buyerId;
 
-    const [, newOffer] = await this.prisma.$transaction([
-      this.prisma.offer.update({
-        where: { id: parent.id },
+    const newOffer = await this.prisma.$transaction(async (tx) => {
+      // Conditional on the parent still being open, so two concurrent responses can't both land.
+      const parentUpdate = await tx.offer.updateMany({
+        where: { id: parent.id, status: { in: OPEN_OFFER_STATUSES } },
         data: { status: OfferStatus.COUNTERED, respondedAt: new Date() },
-      }),
-      this.prisma.offer.create({
+      });
+      if (parentUpdate.count === 0) {
+        throw new ConflictAppException(
+          ErrorCode.OFFER_INVALID_STATE_TRANSITION,
+          'This offer can no longer be countered',
+        );
+      }
+      return tx.offer.create({
         data: {
           negotiationId: parent.negotiationId,
           businessId: parent.businessId,
@@ -182,6 +206,8 @@ export class OffersService {
           amountMinor,
           currency: dto.currency ?? parent.currency,
           terms: dto.terms,
+          message: dto.message,
+          expiresAt,
           status: OfferStatus.SUBMITTED,
           createdById: user.id,
           submittedAt: new Date(),
@@ -195,14 +221,21 @@ export class OffersService {
             },
           },
         },
-      }),
-    ]);
+      });
+    });
 
     await this.notificationsService.create({
       userId: counterpartyId,
       type: 'COUNTER_OFFER',
       title: 'You received a counter-offer',
       metadata: { offerId: newOffer.id },
+    });
+    await this.auditService.record({
+      userId: user.id,
+      action: 'OFFER_COUNTERED',
+      targetType: 'Offer',
+      targetId: newOffer.id,
+      metadata: { parentOfferId: parent.id, amount: dto.amount },
     });
 
     return this.serializeOffer(newOffer);
@@ -240,6 +273,12 @@ export class OffersService {
       title: 'Your offer was rejected',
       metadata: { offerId: offer.id },
     });
+    await this.auditService.record({
+      userId: user.id,
+      action: 'OFFER_REJECTED',
+      targetType: 'Offer',
+      targetId: offer.id,
+    });
 
     return { success: true };
   }
@@ -269,6 +308,20 @@ export class OffersService {
       data: { status: NegotiationStatus.WITHDRAWN },
     });
 
+    const counterpartyId = user.id === offer.buyerId ? offer.sellerId : offer.buyerId;
+    await this.notificationsService.create({
+      userId: counterpartyId,
+      type: 'DEAL_UPDATE',
+      title: 'An offer was withdrawn',
+      metadata: { offerId: offer.id },
+    });
+    await this.auditService.record({
+      userId: user.id,
+      action: 'OFFER_WITHDRAWN',
+      targetType: 'Offer',
+      targetId: offer.id,
+    });
+
     return { success: true };
   }
 
@@ -288,6 +341,7 @@ export class OffersService {
         'You cannot accept your own offer',
       );
     }
+    await this.assertNotExpired(offer);
 
     const deal = await this.prisma.$transaction(async (tx) => {
       const acceptResult = await tx.offer.updateMany({
@@ -301,9 +355,12 @@ export class OffersService {
         );
       }
 
+      // The listing comes off the market for the life of the deal. It only
+      // becomes SOLD when the deal completes (DealsService); if the deal is
+      // cancelled the seller can resume it.
       const businessUpdate = await tx.business.updateMany({
         where: { id: offer.businessId, status: BusinessStatus.PUBLISHED },
-        data: { status: BusinessStatus.SOLD },
+        data: { status: BusinessStatus.PAUSED },
       });
       if (businessUpdate.count === 0) {
         throw new ConflictAppException(
@@ -314,7 +371,7 @@ export class OffersService {
 
       await tx.businessListing.update({
         where: { businessId: offer.businessId },
-        data: { status: ListingStatus.SOLD },
+        data: { status: ListingStatus.UNPUBLISHED },
       });
 
       await tx.negotiation.update({
@@ -382,6 +439,25 @@ export class OffersService {
     });
 
     return deal;
+  }
+
+  private parseExpiry(value: string | undefined): Date | undefined {
+    if (!value) return undefined;
+    const expiresAt = new Date(value);
+    if (expiresAt.getTime() <= Date.now()) {
+      throw new ConflictAppException(ErrorCode.VALIDATION_ERROR, 'expiresAt must be in the future');
+    }
+    return expiresAt;
+  }
+
+  /** Lazily expires an offer whose deadline has passed, then refuses to act on it. */
+  private async assertNotExpired(offer: Offer): Promise<void> {
+    if (!offer.expiresAt || offer.expiresAt.getTime() > Date.now()) return;
+    await this.prisma.offer.updateMany({
+      where: { id: offer.id, status: { in: OPEN_OFFER_STATUSES } },
+      data: { status: OfferStatus.EXPIRED },
+    });
+    throw new ConflictAppException(ErrorCode.OFFER_EXPIRED, 'This offer has expired');
   }
 
   private async getParticipantOffer(user: AuthenticatedUser, offerId: string): Promise<Offer> {

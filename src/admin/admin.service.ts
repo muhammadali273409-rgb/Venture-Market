@@ -115,6 +115,10 @@ export class AdminService {
       BusinessStatus.PENDING_REVIEW,
       BusinessStatus.REJECTED,
     );
+    await this.prisma.businessListing.update({
+      where: { businessId },
+      data: { status: ListingStatus.DRAFT },
+    });
     await this.recordAdminAction(admin, 'BUSINESS_REJECTED', businessId, reason);
     await this.notificationsService.create({
       userId: business.ownerId,

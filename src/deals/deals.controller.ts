@@ -30,6 +30,24 @@ export class DealsController {
     return this.dealsService.updateStatus(user, id, dto);
   }
 
+  /** Buyer/seller signs the deal NDA; due diligence opens once both have signed. */
+  @Post(':id/nda/sign')
+  signNda(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.dealsService.signNda(user, id);
+  }
+
+  /** Seller: the business has been handed over. */
+  @Post(':id/confirm-transfer')
+  confirmTransfer(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.dealsService.confirmTransfer(user, id);
+  }
+
+  /** Buyer: the business was received — completes the deal. */
+  @Post(':id/confirm-receipt')
+  confirmReceipt(@CurrentUser() user: AuthenticatedUser, @Param('id') id: string) {
+    return this.dealsService.confirmReceipt(user, id);
+  }
+
   @Post(':id/participants')
   addParticipant(
     @CurrentUser() user: AuthenticatedUser,
