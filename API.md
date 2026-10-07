@@ -54,6 +54,30 @@ to `/api/v1/auth`, and rotated on every use.
 | Webhooks | `/webhooks/payment` | Stripe-style signature verification, idempotent |
 | Health | `/health` (liveness), `/ready` (readiness — pings DB) | public |
 
+## Seller projects → marketplace
+
+A "project" is a `Business` + its `BusinessListing`, owned by `Business.ownerId` (the seller's `User.id`).
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| POST | `/businesses` | SELLER, BUYER_SELLER | Creates a DRAFT. Accepts business fields plus `city`, `headline`, `askingPrice`, `currency` (USD/EUR/GBP), `annualRevenue` (stored as a REVENUE metric) |
+| GET | `/businesses` | any signed-in user | The caller's own projects (with signed `images`) |
+| GET | `/businesses/:id` | owner, ADMIN | 404 for anyone else |
+| PATCH | `/businesses/:id` | owner, ADMIN | Business fields incl. `categoryId`, `city` |
+| PATCH | `/businesses/:id/listing` | owner, ADMIN | `headline`, `askingPrice`, `currency`, `visibility` |
+| POST | `/businesses/:id/images` | owner, ADMIN | multipart `file` (JPEG/PNG/WebP ≤5MB) + `kind` = `LOGO` \| `GALLERY`; one logo (replaced), ≤10 gallery images |
+| DELETE | `/businesses/:id/images/:imageId` | owner, ADMIN | |
+| POST | `/businesses/:id/publish` | owner, ADMIN | DRAFT/REJECTED/PENDING_REVIEW → PUBLISHED, live immediately (sets visibility PUBLIC unless UNLISTED). PAUSED → resumes. Requires name, description, category, business model, asking price (`409 LISTING_INCOMPLETE`) |
+| POST | `/businesses/:id/unpublish` | owner, ADMIN | PUBLISHED → PAUSED, hidden from the marketplace |
+| DELETE | `/businesses/:id` | owner, ADMIN | Soft delete. Seller: DRAFT/REJECTED/PAUSED only (unpublish first). Admin: any status. Refused while a deal is active |
+| GET | `/listings` | public | PUBLISHED + PUBLIC, seller account active. Filters: `q` (text), `categoryId`, `city`, `country`, `sellerId`, `minPrice`/`maxPrice`, `minMrr`, `verified`; returns `seller`, `logoUrl`, `coverUrl`, `metrics` |
+| GET | `/listings/:idOrSlug` | public | Same rules (UNLISTED also reachable by link); adds `description`, `images`, `verifications` |
+
+Deleting accounts: `businesses.ownerId → users.id` is `ON DELETE RESTRICT`, so a seller who owns projects can't be
+hard-deleted (their deals/offers history depends on them). Accounts are soft-deleted (`users.deletedAt`) or
+SUSPENDED/DEACTIVATED, and the marketplace hides every project whose owner is in any of those states. Removing a
+project row cascades to its listing, metrics, images and documents.
+
 ## Realtime
 
 Socket.IO namespace `/realtime`. Connect with `{ auth: { token: <access_token> } }`; the gateway verifies

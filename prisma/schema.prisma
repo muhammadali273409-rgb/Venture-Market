@@ -115,6 +115,11 @@ enum DocumentCategory {
   OTHER
 }
 
+enum BusinessImageKind {
+  LOGO
+  GALLERY
+}
+
 enum DocumentVisibility {
   PRIVATE
   DEAL_PARTICIPANTS
@@ -476,6 +481,7 @@ model Business {
   businessModel  String?
   foundedAt      DateTime?
   country        String?
+  city           String?
   website        String?
   status         BusinessStatus @default(DRAFT)
   createdAt      DateTime       @default(now())
@@ -486,6 +492,7 @@ model Business {
   metrics        BusinessMetric[]
   verifications  BusinessVerification[]
   documents      BusinessDocument[]
+  images         BusinessImage[]
   watchlistedBy  Watchlist[]
   offers         Offer[]
   negotiations   Negotiation[]
@@ -496,6 +503,24 @@ model Business {
   @@index([status])
   @@index([categoryId])
   @@map("businesses")
+}
+
+/// Public-facing listing media (logo + gallery). Unlike BusinessDocument these
+/// are meant to be shown on the marketplace; the bucket itself stays private
+/// and every read returns a short-lived signed URL.
+model BusinessImage {
+  id         String            @id @default(uuid())
+  businessId String
+  business   Business          @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  kind       BusinessImageKind @default(GALLERY)
+  storageKey String            @unique
+  mimeType   String
+  size       Int
+  position   Int               @default(0)
+  createdAt  DateTime          @default(now())
+
+  @@index([businessId, kind, position])
+  @@map("business_images")
 }
 
 model BusinessListing {

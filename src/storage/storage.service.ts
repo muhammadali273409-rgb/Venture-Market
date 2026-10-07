@@ -36,6 +36,11 @@ export class StorageService {
     return `businesses/${businessId}/documents/${nanoid()}-${safeName}`;
   }
 
+  buildImageKey(businessId: string, fileName: string): string {
+    const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+    return `businesses/${businessId}/images/${nanoid()}-${safeName}`;
+  }
+
   async putObject(key: string, body: Buffer, mimeType: string): Promise<void> {
     await this.client.send(
       new PutObjectCommand({

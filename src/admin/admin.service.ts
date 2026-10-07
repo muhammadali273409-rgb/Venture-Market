@@ -99,6 +99,11 @@ export class AdminService {
       where: { businessId },
       data: { status: ListingStatus.PUBLISHED, publishedAt: new Date() },
     });
+    // Listings are created PRIVATE; without this an approved listing never reached the marketplace.
+    await this.prisma.businessListing.updateMany({
+      where: { businessId, visibility: 'PRIVATE' },
+      data: { visibility: 'PUBLIC' },
+    });
     await this.recordAdminAction(admin, 'BUSINESS_APPROVED', businessId, reason);
     await this.notificationsService.create({
       userId: business.ownerId,

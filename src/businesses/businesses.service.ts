@@ -1,9 +1,19 @@
 import { Injectable } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { Business, BusinessStatus, DealStatus, ListingStatus, UserRole } from '@prisma/client';
+import {
+  Business,
+  BusinessImageKind,
+  BusinessStatus,
+  DealStatus,
+  ListingStatus,
+  ListingVisibility,
+  UserRole,
+} from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../common/audit/audit.service';
+import { StorageService } from '../storage/storage.service';
+import { ORDERED_IMAGES, serializeImages } from './business-media';
 import { QUEUE_NAMES, DEFAULT_JOB_OPTIONS } from '../jobs/queue.constants';
 import { uniqueSlug } from '../common/utils/slugify';
 import { toMinorUnits, toMajorUnits } from '../common/utils/money';
@@ -22,13 +32,14 @@ import { CreateMetricDto } from './dto/create-metric.dto';
 import { UpdateListingDto } from './dto/update-listing.dto';
 
 const businessStateMachine = new StateMachine<BusinessStatus>({
-  DRAFT: ['PENDING_REVIEW', 'ARCHIVED'],
+  // DRAFT -> PUBLISHED: sellers publish directly; admins moderate afterwards (suspend).
+  DRAFT: ['PUBLISHED', 'PENDING_REVIEW', 'ARCHIVED'],
   PENDING_REVIEW: ['PUBLISHED', 'REJECTED', 'DRAFT'],
   PUBLISHED: ['PAUSED', 'SOLD', 'SUSPENDED', 'ARCHIVED'],
   // PAUSED -> SOLD: an accepted offer pauses the listing while the deal runs; completing the deal sells it.
   PAUSED: ['PUBLISHED', 'SOLD', 'ARCHIVED'],
   // A rejected listing can be fixed and resubmitted directly.
-  REJECTED: ['DRAFT', 'PENDING_REVIEW'],
+  REJECTED: ['DRAFT', 'PENDING_REVIEW', 'PUBLISHED'],
   SUSPENDED: ['PUBLISHED', 'ARCHIVED'],
   SOLD: ['ARCHIVED'],
   ARCHIVED: [],
@@ -42,11 +53,35 @@ const LOCKED_BUSINESS_STATUSES: BusinessStatus[] = [
   BusinessStatus.ARCHIVED,
 ];
 
-/** Only never-approved businesses can be deleted by their seller. */
+/**
+ * A seller can delete a business that isn't live: never published, or
+ * unpublished (PAUSED). A live listing has to be unpublished first, and a
+ * SOLD/SUSPENDED one is kept for the record. Admins can delete any business
+ * that has no deal in progress.
+ */
 const DELETABLE_BUSINESS_STATUSES: BusinessStatus[] = [
   BusinessStatus.DRAFT,
   BusinessStatus.REJECTED,
+  BusinessStatus.PAUSED,
 ];
+
+/** Statuses a seller can publish from (PAUSED goes through resume()). */
+const PUBLISHABLE_BUSINESS_STATUSES: BusinessStatus[] = [
+  BusinessStatus.DRAFT,
+  BusinessStatus.REJECTED,
+  BusinessStatus.PENDING_REVIEW,
+];
+
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024;
+const MAX_GALLERY_IMAGES = 10;
+
+export interface UploadedImagePayload {
+  originalname: string;
+  mimetype: string;
+  size: number;
+  buffer: Buffer;
+}
 
 export const ACTIVE_DEAL_STATUSES: DealStatus[] = [
   DealStatus.INITIATED,
@@ -71,6 +106,7 @@ export class BusinessesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly storageService: StorageService,
     @InjectQueue(QUEUE_NAMES.SAVED_SEARCH_ALERTS) private readonly savedSearchQueue: Queue,
   ) {}
 
@@ -99,9 +135,31 @@ export class BusinessesService {
         businessModel: dto.businessModel,
         foundedAt: dto.foundedAt ? new Date(dto.foundedAt) : undefined,
         country: dto.country,
+        city: dto.city,
         website: dto.website,
         status: BusinessStatus.DRAFT,
-        listing: { create: { status: ListingStatus.DRAFT } },
+        listing: {
+          create: {
+            status: ListingStatus.DRAFT,
+            askingPriceMinor:
+              dto.askingPrice !== undefined ? toMinorUnits(dto.askingPrice) : undefined,
+            currency: dto.currency,
+            headline: dto.headline,
+          },
+        },
+        metrics:
+          dto.annualRevenue !== undefined
+            ? {
+                create: {
+                  metricType: 'REVENUE',
+                  valueMinor: toMinorUnits(dto.annualRevenue),
+                  currency: dto.currency ?? 'USD',
+                  period: new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1)),
+                  source: 'SELLER_PROVIDED',
+                  verificationStatus: 'UNVERIFIED',
+                },
+              }
+            : undefined,
       },
     });
 
@@ -118,7 +176,7 @@ export class BusinessesService {
   async findOwned(user: AuthenticatedUser, id: string) {
     const business = await this.prisma.business.findUnique({
       where: { id },
-      include: { listing: true, category: true, metrics: true },
+      include: { listing: true, category: true, metrics: true, images: ORDERED_IMAGES },
     });
 
     if (!business || business.deletedAt || !this.canManage(user, business)) {
@@ -131,10 +189,10 @@ export class BusinessesService {
   async listOwned(user: AuthenticatedUser) {
     const businesses = await this.prisma.business.findMany({
       where: { ownerId: user.id, deletedAt: null },
-      include: { listing: true },
+      include: { listing: true, category: true, images: ORDERED_IMAGES },
       orderBy: { createdAt: 'desc' },
     });
-    return businesses.map((business) => this.serializeBusiness(business));
+    return Promise.all(businesses.map((business) => this.serializeBusiness(business)));
   }
 
   /**
@@ -143,9 +201,10 @@ export class BusinessesService {
    * the same way the public listings endpoints already do.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  private serializeBusiness(business: any) {
+  private async serializeBusiness(business: any) {
     return {
       ...business,
+      images: await serializeImages(this.storageService, business.images),
       listing: business.listing ? this.serializeListing(business.listing) : business.listing,
       metrics: business.metrics
         ? business.metrics.map((m: any) => this.serializeMetric(m))
@@ -184,6 +243,7 @@ export class BusinessesService {
         businessModel: dto.businessModel,
         foundedAt: dto.foundedAt ? new Date(dto.foundedAt) : undefined,
         country: dto.country,
+        city: dto.city,
         website: dto.website,
       },
     });
@@ -191,16 +251,31 @@ export class BusinessesService {
 
   async softDelete(user: AuthenticatedUser, id: string) {
     const business = await this.findOwned(user, id);
-    if (!DELETABLE_BUSINESS_STATUSES.includes(business.status)) {
+    const isAdmin = user.role === UserRole.ADMIN;
+    if (!isAdmin && !DELETABLE_BUSINESS_STATUSES.includes(business.status)) {
       throw new ConflictAppException(
         ErrorCode.BUSINESS_INVALID_STATE_TRANSITION,
-        'Only draft or rejected businesses can be deleted — pause or archive a published listing instead',
+        business.status === BusinessStatus.PUBLISHED
+          ? 'Unpublish this listing before deleting it'
+          : `A ${business.status} business cannot be deleted`,
       );
     }
-    await this.prisma.business.update({
-      where: { id: business.id },
-      data: { deletedAt: new Date() },
-    });
+    if (await this.hasActiveDeal(business.id)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_LOCKED,
+        'This business cannot be deleted while a deal on it is in progress',
+      );
+    }
+    await this.prisma.$transaction([
+      this.prisma.business.update({
+        where: { id: business.id },
+        data: { deletedAt: new Date() },
+      }),
+      this.prisma.businessListing.update({
+        where: { businessId: business.id },
+        data: { status: ListingStatus.UNPUBLISHED },
+      }),
+    ]);
     await this.auditService.record({
       userId: user.id,
       action: 'BUSINESS_DELETED',
@@ -240,6 +315,148 @@ export class BusinessesService {
       },
     });
     return this.serializeListing(listing);
+  }
+
+  /**
+   * Seller publishes straight to the marketplace: DRAFT / REJECTED /
+   * PENDING_REVIEW -> PUBLISHED once the listing is complete, and a PAUSED
+   * listing is resumed. Moderation happens after the fact (admin suspend).
+   */
+  async publish(user: AuthenticatedUser, businessId: string) {
+    const business = await this.findOwned(user, businessId);
+    if (business.status === BusinessStatus.PAUSED) {
+      return this.resume(user, businessId);
+    }
+    if (!PUBLISHABLE_BUSINESS_STATUSES.includes(business.status)) {
+      throw new ConflictAppException(
+        ErrorCode.BUSINESS_INVALID_STATE_TRANSITION,
+        `A ${business.status} business cannot be published`,
+      );
+    }
+    this.assertTransition(business.status, BusinessStatus.PUBLISHED);
+
+    const completeness = this.calculateCompleteness(business);
+    if (completeness.score < 100) {
+      throw new ConflictAppException(
+        ErrorCode.LISTING_INCOMPLETE,
+        `Listing is missing required fields: ${completeness.missing.join(', ')}`,
+      );
+    }
+
+    const [updatedBusiness] = await this.prisma.$transaction([
+      this.prisma.business.update({
+        where: { id: business.id },
+        data: { status: BusinessStatus.PUBLISHED },
+      }),
+      this.prisma.businessListing.update({
+        where: { businessId: business.id },
+        data: {
+          status: ListingStatus.PUBLISHED,
+          completenessScore: completeness.score,
+          publishedAt: business.listing?.publishedAt ?? new Date(),
+          // PRIVATE is the creation default and would keep it off the marketplace;
+          // an explicit UNLISTED choice (link-only) is respected.
+          visibility:
+            business.listing?.visibility === ListingVisibility.UNLISTED
+              ? ListingVisibility.UNLISTED
+              : ListingVisibility.PUBLIC,
+        },
+      }),
+    ]);
+
+    await this.auditService.record({
+      userId: user.id,
+      action: 'BUSINESS_PUBLISHED',
+      targetType: 'Business',
+      targetId: business.id,
+    });
+
+    await this.savedSearchQueue.add(
+      'match-saved-searches',
+      { businessId: business.id },
+      DEFAULT_JOB_OPTIONS,
+    );
+
+    return updatedBusiness;
+  }
+
+  async uploadImage(
+    user: AuthenticatedUser,
+    businessId: string,
+    file: UploadedImagePayload | undefined,
+    kind: BusinessImageKind = BusinessImageKind.GALLERY,
+  ) {
+    if (!file) {
+      throw new AppException(ErrorCode.DOCUMENT_INVALID_FILE, 'An image file is required');
+    }
+    if (!IMAGE_MIME_TYPES.has(file.mimetype)) {
+      throw new AppException(
+        ErrorCode.DOCUMENT_INVALID_FILE,
+        'Only JPEG, PNG or WebP images are allowed',
+      );
+    }
+    if (file.size > MAX_IMAGE_SIZE_BYTES) {
+      throw new AppException(ErrorCode.DOCUMENT_INVALID_FILE, 'Image exceeds the 5MB limit');
+    }
+
+    const business = await this.findOwned(user, businessId);
+    await this.assertEditable(business);
+
+    const existing = await this.prisma.businessImage.findMany({
+      where: { businessId: business.id, kind },
+    });
+    if (kind === BusinessImageKind.GALLERY && existing.length >= MAX_GALLERY_IMAGES) {
+      throw new ConflictAppException(
+        ErrorCode.DOCUMENT_INVALID_FILE,
+        `A listing can have at most ${MAX_GALLERY_IMAGES} gallery images`,
+      );
+    }
+
+    const storageKey = this.storageService.buildImageKey(business.id, file.originalname);
+    await this.storageService.putObject(storageKey, file.buffer, file.mimetype);
+
+    // A business has a single logo: uploading a new one replaces the old.
+    const replaced = kind === BusinessImageKind.LOGO ? existing : [];
+    const [image] = await this.prisma.$transaction([
+      this.prisma.businessImage.create({
+        data: {
+          businessId: business.id,
+          kind,
+          storageKey,
+          mimeType: file.mimetype,
+          size: file.size,
+          position: kind === BusinessImageKind.LOGO ? 0 : existing.length,
+        },
+      }),
+      this.prisma.businessImage.deleteMany({ where: { id: { in: replaced.map((i) => i.id) } } }),
+    ]);
+    await Promise.all(replaced.map((i) => this.deleteStoredObject(i.storageKey)));
+
+    const [serialized] = await serializeImages(this.storageService, [image]);
+    return serialized;
+  }
+
+  async deleteImage(user: AuthenticatedUser, businessId: string, imageId: string) {
+    const business = await this.findOwned(user, businessId);
+    await this.assertEditable(business);
+    const image = await this.prisma.businessImage.findFirst({
+      where: { id: imageId, businessId: business.id },
+    });
+    if (!image) {
+      throw new NotFoundAppException(ErrorCode.BUSINESS_NOT_FOUND, 'Image not found');
+    }
+    await this.prisma.businessImage.delete({ where: { id: image.id } });
+    await this.deleteStoredObject(image.storageKey);
+    return { success: true };
+  }
+
+  /** The DB row is the source of truth; a leftover object in the bucket is harmless. */
+  private async deleteStoredObject(key: string): Promise<void> {
+    try {
+      await this.storageService.deleteObject(key);
+    } catch {
+      // Best effort — never fail the request over storage cleanup.
+    }
   }
 
   /**
@@ -422,15 +639,24 @@ export class BusinessesService {
     return business.ownerId === user.id || user.role === UserRole.ADMIN;
   }
 
+  /**
+   * Accepts both the raw Prisma listing (askingPriceMinor) and the serialized
+   * one findOwned() returns (askingPrice) — checking only the raw field made
+   * every serialized business look like it had no price.
+   */
   private calculateCompleteness(
-    business: Business & { listing: { askingPriceMinor: bigint | null } | null },
+    business: Business & {
+      listing: { askingPriceMinor?: bigint | null; askingPrice?: number | null } | null;
+    },
   ): { score: number; missing: string[] } {
     const missing: string[] = [];
     if (!business.name) missing.push('name');
     if (!business.description) missing.push('description');
     if (!business.categoryId) missing.push('categoryId');
     if (!business.businessModel) missing.push('businessModel');
-    if (!business.listing?.askingPriceMinor) missing.push('askingPrice');
+    if (!business.listing?.askingPrice && !business.listing?.askingPriceMinor) {
+      missing.push('askingPrice');
+    }
 
     const score = Math.round(
       ((REQUIRED_LISTING_FIELDS.length - missing.length) / REQUIRED_LISTING_FIELDS.length) * 100,
