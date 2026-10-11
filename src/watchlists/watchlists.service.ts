@@ -1,16 +1,25 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../database/prisma.service';
+import { serializeListing } from '../businesses/serialize-listing';
 
 @Injectable()
 export class WatchlistsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(userId: string) {
-    return this.prisma.watchlist.findMany({
+  async list(userId: string) {
+    const items = await this.prisma.watchlist.findMany({
       where: { userId },
       include: { business: { include: { listing: true } } },
       orderBy: { createdAt: 'desc' },
     });
+    // Listing money columns are BigInt, which JSON can't serialize.
+    return items.map((item) => ({
+      ...item,
+      business: {
+        ...item.business,
+        listing: item.business.listing ? serializeListing(item.business.listing) : null,
+      },
+    }));
   }
 
   async add(userId: string, businessId: string) {

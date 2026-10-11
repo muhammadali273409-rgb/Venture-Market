@@ -1,22 +1,46 @@
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
-  IsBooleanString,
   IsIn,
   IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Matches,
   Max,
   MaxLength,
   Min,
 } from 'class-validator';
 
-const SORTABLE_FIELDS = ['createdAt', 'price', 'mrr'] as const;
+/**
+ * `revenue` sorts on monthly revenue (latest MRR) and `profit` on monthly
+ * profit (latest PROFIT). `mrr` is the older alias of `revenue`.
+ */
+export const SORTABLE_FIELDS = ['createdAt', 'price', 'revenue', 'profit', 'mrr'] as const;
 export type SortableField = (typeof SORTABLE_FIELDS)[number];
+
+/** Upper bound for any money filter (major units) — far above any real listing. */
+const MAX_MONEY = 1_000_000_000_000;
+export const MAX_PAGE_SIZE = 50;
+export const DEFAULT_PAGE_SIZE = 12;
+const MAX_PAGE = 10_000;
+
+const trim = ({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value);
+
+/** Optional, non-negative whole money amount in major units (e.g. dollars). */
+function Money(): PropertyDecorator {
+  return (target, key) => {
+    IsOptional()(target, key);
+    Type(() => Number)(target, key);
+    IsInt()(target, key);
+    Min(0)(target, key);
+    Max(MAX_MONEY)(target, key);
+  };
+}
 
 export class SearchListingsDto {
   /** Free-text search over name, headline, description, business model, city and category. */
   @IsOptional()
+  @Transform(trim)
   @IsString()
   @MaxLength(100)
   q?: string;
@@ -25,40 +49,53 @@ export class SearchListingsDto {
   @IsUUID()
   categoryId?: string;
 
+  /** Category slug — the shareable form used in marketplace URLs. */
   @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  @Matches(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, { message: 'category must be a category slug' })
+  category?: string;
+
+  /** Exact business model (case-insensitive), as listed by GET /listings/facets. */
+  @IsOptional()
+  @Transform(trim)
+  @IsString()
+  @MaxLength(80)
+  businessModel?: string;
+
+  @IsOptional()
+  @Transform(trim)
   @IsString()
   @MaxLength(100)
   city?: string;
 
-  /** Only this seller's listings (the "more from this seller" view). */
+  /** Only this seller's listings (the seller profile view). */
   @IsOptional()
   @IsUUID()
   sellerId?: string;
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  minPrice?: number;
+  @Money() minPrice?: number;
+  @Money() maxPrice?: number;
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  maxPrice?: number;
+  /** Monthly revenue range (latest MRR metric). */
+  @Money() minRevenue?: number;
+  @Money() maxRevenue?: number;
 
-  @IsOptional()
-  @Type(() => Number)
-  @IsInt()
-  @Min(0)
-  minMrr?: number;
+  /** Monthly profit range (latest PROFIT metric). */
+  @Money() minProfit?: number;
+  @Money() maxProfit?: number;
 
+  /** @deprecated alias of minRevenue, kept so existing links keep working. */
+  @Money() minMrr?: number;
+
+  /** "true" → only businesses with at least one VERIFIED verification. */
   @IsOptional()
-  @IsBooleanString()
-  verified?: string;
+  @IsIn(['true', 'false'])
+  verified?: 'true' | 'false';
 
   @IsOptional()
   @IsString()
+  @Matches(/^[A-Za-z]{2}$/, { message: 'country must be a 2-letter country code' })
   country?: string;
 
   @IsOptional()
@@ -70,13 +107,16 @@ export class SearchListingsDto {
   sortDir?: 'asc' | 'desc';
 
   @IsOptional()
-  @IsString()
-  cursor?: string;
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(MAX_PAGE)
+  page?: number;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(100)
-  limit?: number = 20;
+  @Max(MAX_PAGE_SIZE)
+  limit?: number;
 }

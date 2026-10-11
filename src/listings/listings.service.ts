@@ -1,25 +1,44 @@
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { StorageService } from '../storage/storage.service';
 import { ErrorCode } from '../common/constants/error-codes';
-import { NotFoundAppException } from '../common/errors/app.exception';
-import { buildCursorPage } from '../common/utils/cursor-pagination';
+import { AppException, NotFoundAppException } from '../common/errors/app.exception';
 import { toMinorUnits, toMajorUnits } from '../common/utils/money';
 import { ORDERED_IMAGES, pickCardMedia, serializeImages } from '../businesses/business-media';
-import { SearchListingsDto } from './dto/search-listings.dto';
+import { DEFAULT_PAGE_SIZE, SearchListingsDto, SortableField } from './dto/search-listings.dto';
 
 /**
  * A listing is only public while its seller's account is usable: a
  * soft-deleted, suspended or deactivated seller's projects drop off the
  * marketplace without touching the projects themselves.
  */
-const ACTIVE_OWNER: Prisma.UserWhereInput = {
+export const ACTIVE_OWNER: Prisma.UserWhereInput = {
   deletedAt: null,
   status: { notIn: ['SUSPENDED', 'DEACTIVATED'] },
 };
 
-/** Public seller fields only — never email or other account data. */
+/**
+ * Shown in marketplace search and on seller profiles: live, PUBLIC listings
+ * only. Drafts, paused, sold, suspended and deleted businesses never match.
+ */
+export const PUBLICLY_LISTED: Prisma.BusinessWhereInput = {
+  deletedAt: null,
+  status: 'PUBLISHED',
+  listing: { status: 'PUBLISHED', visibility: 'PUBLIC' },
+  owner: ACTIVE_OWNER,
+};
+
+/**
+ * Reachable by direct link (detail page, contacting the seller): live
+ * PUBLIC or UNLISTED (link-only) listings.
+ */
+export const PUBLICLY_REACHABLE: Prisma.BusinessWhereInput = {
+  ...PUBLICLY_LISTED,
+  listing: { status: 'PUBLISHED', visibility: { in: ['PUBLIC', 'UNLISTED'] } },
+};
+
+/** Public seller fields only — never email, phone or other account data. */
 const SELLER_SELECT = {
   id: true,
   createdAt: true,
@@ -46,7 +65,12 @@ const LISTING_INCLUDE = {
   owner: { select: SELLER_SELECT },
   images: ORDERED_IMAGES,
   metrics: PUBLIC_METRICS,
+  verifications: { select: { type: true, status: true } },
 } satisfies Prisma.BusinessInclude;
+
+const EXCERPT_LENGTH = 220;
+
+type RangeKey = 'Price' | 'Revenue' | 'Profit';
 
 @Injectable()
 export class ListingsService {
@@ -56,43 +80,144 @@ export class ListingsService {
   ) {}
 
   async search(query: SearchListingsDto) {
-    const limit = query.limit ?? 20;
+    const page = query.page ?? 1;
+    const limit = query.limit ?? DEFAULT_PAGE_SIZE;
+    const where = this.buildWhere(query);
+    const orderBy = this.buildOrderBy(query.sortBy, query.sortDir ?? 'desc');
+
+    const [total, businesses] = await this.prisma.$transaction([
+      this.prisma.business.count({ where }),
+      this.prisma.business.findMany({
+        where,
+        orderBy,
+        skip: (page - 1) * limit,
+        take: limit,
+        include: LISTING_INCLUDE,
+      }),
+    ]);
+
+    const totalPages = Math.ceil(total / limit);
+    return {
+      data: await Promise.all(
+        businesses.map(async (b) => {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { images, ...summary } = await this.toPublicSummary(b);
+          return summary;
+        }),
+      ),
+      pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    };
+  }
+
+  /**
+   * The business models that currently have public listings, for the
+   * marketplace's business-model filter. Values are free text entered by
+   * sellers, so case variants ("SaaS" / "saas") are merged.
+   */
+  async facets() {
+    const rows = await this.prisma.business.groupBy({
+      by: ['businessModel'],
+      where: { ...PUBLICLY_LISTED, businessModel: { not: null } },
+      _count: { _all: true },
+    });
+
+    const merged = new Map<string, { value: string; count: number; best: number }>();
+    for (const row of rows) {
+      const value = row.businessModel?.trim();
+      if (!value) continue;
+      const key = value.toLowerCase();
+      const current = merged.get(key);
+      if (!current) {
+        merged.set(key, { value, count: row._count._all, best: row._count._all });
+      } else {
+        current.count += row._count._all;
+        // Keep the spelling most sellers used.
+        if (row._count._all > current.best) {
+          current.value = value;
+          current.best = row._count._all;
+        }
+      }
+    }
+
+    return {
+      businessModels: [...merged.values()]
+        .map(({ value, count }) => ({ value, count }))
+        .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value)),
+    };
+  }
+
+  /**
+   * Public detail. PUBLIC and UNLISTED (link-only) listings are reachable by
+   * id or slug; drafts, paused, sold, suspended and deleted ones are a 404
+   * for everyone — the seller previews their own through /businesses/:id.
+   */
+  async getPublicDetail(idOrSlug: string) {
+    const business = await this.prisma.business.findFirst({
+      where: { OR: [{ id: idOrSlug }, { slug: idOrSlug }], ...PUBLICLY_REACHABLE },
+      include: LISTING_INCLUDE,
+    });
+
+    if (!business) {
+      throw new NotFoundAppException(ErrorCode.LISTING_NOT_FOUND, 'Listing not found');
+    }
+
+    return this.toPublicDetail(business);
+  }
+
+  /**
+   * Public seller profile. Only users who currently have at least one public
+   * listing have one — so this can't be used to probe arbitrary accounts —
+   * and it exposes exactly what listings already show about the seller.
+   */
+  async getPublicSeller(id: string) {
+    const seller = await this.prisma.user.findFirst({
+      where: { id, ...ACTIVE_OWNER, businesses: { some: PUBLICLY_LISTED } },
+      select: {
+        ...SELLER_SELECT,
+        _count: { select: { businesses: { where: PUBLICLY_LISTED } } },
+      },
+    });
+    if (!seller) {
+      throw new NotFoundAppException(ErrorCode.NOT_FOUND, 'Seller not found');
+    }
+    return { ...this.toSeller(seller), publicListings: seller._count.businesses };
+  }
+
+  buildWhere(query: SearchListingsDto): Prisma.BusinessWhereInput {
+    this.assertRange('Price', query.minPrice, query.maxPrice);
+    const minRevenue = query.minRevenue ?? query.minMrr;
+    this.assertRange('Revenue', minRevenue, query.maxRevenue);
+    this.assertRange('Profit', query.minProfit, query.maxProfit);
 
     const listingWhere: Prisma.BusinessListingWhereInput = {
       status: 'PUBLISHED',
       visibility: 'PUBLIC',
     };
+    const price = moneyRange(query.minPrice, query.maxPrice);
+    if (price) listingWhere.askingPriceMinor = price;
+    const revenue = moneyRange(minRevenue, query.maxRevenue);
+    if (revenue) listingWhere.monthlyRevenueMinor = revenue;
+    const profit = moneyRange(query.minProfit, query.maxProfit);
+    if (profit) listingWhere.monthlyProfitMinor = profit;
 
-    if (query.minPrice !== undefined || query.maxPrice !== undefined) {
-      listingWhere.askingPriceMinor = {
-        gte: query.minPrice !== undefined ? toMinorUnits(query.minPrice) : undefined,
-        lte: query.maxPrice !== undefined ? toMinorUnits(query.maxPrice) : undefined,
-      };
-    }
-
-    const where: Prisma.BusinessWhereInput = {
-      deletedAt: null,
-      status: 'PUBLISHED',
-      listing: listingWhere,
-      owner: ACTIVE_OWNER,
-    };
+    const where: Prisma.BusinessWhereInput = { ...PUBLICLY_LISTED, listing: listingWhere };
 
     if (query.categoryId) {
       where.categoryId = query.categoryId;
+    } else if (query.category) {
+      where.category = { slug: query.category };
+    }
+    if (query.businessModel) {
+      where.businessModel = { equals: query.businessModel, mode: 'insensitive' };
     }
     if (query.country) {
-      where.country = query.country;
+      where.country = { equals: query.country, mode: 'insensitive' };
     }
     if (query.city) {
       where.city = { equals: query.city, mode: 'insensitive' };
     }
     if (query.sellerId) {
       where.ownerId = query.sellerId;
-    }
-    if (query.minMrr !== undefined) {
-      where.metrics = {
-        some: { metricType: 'MRR', valueMinor: { gte: toMinorUnits(query.minMrr) } },
-      };
     }
     if (query.verified === 'true') {
       where.verifications = { some: { status: 'VERIFIED' } };
@@ -116,63 +241,41 @@ export class ListingsService {
         }));
     }
 
-    const orderBy = this.buildOrderBy(query.sortBy, query.sortDir ?? 'desc');
-
-    const businesses = await this.prisma.business.findMany({
-      where,
-      orderBy,
-      take: limit + 1,
-      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
-      include: LISTING_INCLUDE,
-    });
-
-    const page = buildCursorPage(businesses, limit);
-    return {
-      ...page,
-      data: await Promise.all(
-        page.data.map(async (b) => {
-          // eslint-disable-next-line @typescript-eslint/no-unused-vars
-          const { images, ...summary } = await this.toPublicSummary(b);
-          return summary;
-        }),
-      ),
-    };
+    return where;
   }
 
   /**
-   * Public detail. PUBLIC and UNLISTED (link-only) listings are reachable by
-   * id or slug; drafts, paused, suspended and deleted ones are a 404 for
-   * everyone — the seller previews their own through /businesses/:id.
+   * Always ends in a unique key (id) so the order — and therefore every
+   * page — is stable when many listings share a price or have none.
+   * Listings without the sorted figure go last in both directions.
    */
-  async getPublicDetail(idOrSlug: string) {
-    const business = await this.prisma.business.findFirst({
-      where: {
-        OR: [{ id: idOrSlug }, { slug: idOrSlug }],
-        deletedAt: null,
-        status: 'PUBLISHED',
-        listing: { status: 'PUBLISHED', visibility: { in: ['PUBLIC', 'UNLISTED'] } },
-        owner: ACTIVE_OWNER,
-      },
-      include: { ...LISTING_INCLUDE, verifications: true },
-    });
-
-    if (!business) {
-      throw new NotFoundAppException(ErrorCode.LISTING_NOT_FOUND, 'Listing not found');
-    }
-
-    return this.toPublicDetail(business);
-  }
-
-  private buildOrderBy(
-    sortBy: string | undefined,
+  buildOrderBy(
+    sortBy: SortableField | undefined,
     dir: 'asc' | 'desc',
-  ): Prisma.BusinessOrderByWithRelationInput {
+  ): Prisma.BusinessOrderByWithRelationInput[] {
+    const nullsLast = { sort: dir, nulls: 'last' as const };
     switch (sortBy) {
       case 'price':
-        return { listing: { askingPriceMinor: dir } };
+        return [{ listing: { askingPriceMinor: nullsLast } }, { id: 'asc' }];
+      case 'revenue':
+      case 'mrr':
+        return [{ listing: { monthlyRevenueMinor: nullsLast } }, { id: 'asc' }];
+      case 'profit':
+        return [{ listing: { monthlyProfitMinor: nullsLast } }, { id: 'asc' }];
       case 'createdAt':
       default:
-        return { createdAt: dir };
+        // "Recently listed" = when it went live, not when the draft was started.
+        return [{ listing: { publishedAt: nullsLast } }, { createdAt: dir }, { id: 'asc' }];
+    }
+  }
+
+  private assertRange(name: RangeKey, min: number | undefined, max: number | undefined): void {
+    if (min !== undefined && max !== undefined && min > max) {
+      throw new AppException(
+        ErrorCode.VALIDATION_ERROR,
+        `min${name} must be less than or equal to max${name}`,
+        HttpStatus.BAD_REQUEST,
+      );
     }
   }
 
@@ -192,21 +295,34 @@ export class ListingsService {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async toPublicSummary(business: any) {
     const images = await serializeImages(this.storageService, business.images);
+    const listing = business.listing;
+    const description: string | null = business.description ?? null;
     return {
       id: business.id,
       slug: business.slug,
       name: business.name,
-      headline: business.listing?.headline ?? null,
+      headline: listing?.headline ?? null,
+      excerpt:
+        description && description.length > EXCERPT_LENGTH
+          ? `${description.slice(0, EXCERPT_LENGTH).trimEnd()}…`
+          : description,
       category: business.category?.name ?? null,
       categoryId: business.categoryId ?? null,
+      categorySlug: business.category?.slug ?? null,
       country: business.country,
       city: business.city ?? null,
       businessModel: business.businessModel ?? null,
-      askingPrice: business.listing?.askingPriceMinor
-        ? toMajorUnits(business.listing.askingPriceMinor)
-        : null,
-      currency: business.listing?.currency ?? 'USD',
-      publishedAt: business.listing?.publishedAt ?? null,
+      askingPrice: majorOrNull(listing?.askingPriceMinor),
+      currency: listing?.currency ?? 'USD',
+      // Latest monthly figures as disclosed by the seller; null = not disclosed.
+      monthlyRevenue: majorOrNull(listing?.monthlyRevenueMinor),
+      monthlyRevenueVerified: Boolean(listing?.monthlyRevenueVerified),
+      monthlyProfit: majorOrNull(listing?.monthlyProfitMinor),
+      monthlyProfitVerified: Boolean(listing?.monthlyProfitVerified),
+      verified: (business.verifications ?? []).some(
+        (v: { status: string }) => v.status === 'VERIFIED',
+      ),
+      publishedAt: listing?.publishedAt ?? null,
       ...pickCardMedia(images),
       seller: this.toSeller(business.owner),
       metrics: (business.metrics ?? []).map(
@@ -231,4 +347,16 @@ export class ListingsService {
       })),
     };
   }
+}
+
+function moneyRange(min: number | undefined, max: number | undefined) {
+  if (min === undefined && max === undefined) return undefined;
+  return {
+    ...(min !== undefined ? { gte: toMinorUnits(min) } : {}),
+    ...(max !== undefined ? { lte: toMinorUnits(max) } : {}),
+  };
+}
+
+function majorOrNull(minor: bigint | null | undefined): number | null {
+  return minor == null ? null : toMajorUnits(minor);
 }

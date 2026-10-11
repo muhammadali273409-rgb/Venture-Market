@@ -14,6 +14,8 @@ import { PrismaService } from '../database/prisma.service';
 import { AuditService } from '../common/audit/audit.service';
 import { StorageService } from '../storage/storage.service';
 import { ORDERED_IMAGES, serializeImages } from './business-media';
+import { refreshListingFinancials } from './listing-financials';
+import { serializeListing } from './serialize-listing';
 import { QUEUE_NAMES, DEFAULT_JOB_OPTIONS } from '../jobs/queue.constants';
 import { uniqueSlug } from '../common/utils/slugify';
 import { toMinorUnits, toMajorUnits } from '../common/utils/money';
@@ -214,12 +216,7 @@ export class BusinessesService {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private serializeListing(listing: any) {
-    return {
-      ...listing,
-      askingPrice:
-        listing.askingPriceMinor !== null ? toMajorUnits(listing.askingPriceMinor) : null,
-      askingPriceMinor: undefined,
-    };
+    return serializeListing(listing);
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -299,6 +296,7 @@ export class BusinessesService {
         verificationStatus: 'UNVERIFIED',
       },
     });
+    await refreshListingFinancials(this.prisma, business.id);
     return this.serializeMetric(metric);
   }
 

@@ -337,6 +337,7 @@ model User {
   offersAsSeller        Offer[]                 @relation("OfferSeller")
   offerRevisions        OfferRevision[]
   conversationParticipants ConversationParticipant[]
+  conversationsAsBuyer  Conversation[]          @relation("ConversationBuyer")
   messages              Message[]
   dealParticipants      DealParticipant[]
   dealTasksOwned        DealTask[]
@@ -498,6 +499,7 @@ model Business {
   negotiations   Negotiation[]
   deals          Deal[]
   reports        Report[]
+  conversations  Conversation[]
 
   @@index([ownerId])
   @@index([status])
@@ -532,6 +534,15 @@ model BusinessListing {
   askingPriceMinor  BigInt?
   currency          String            @default("USD")
   headline          String?
+  /// Snapshot of the latest MRR metric (monthly revenue, minor units) so the
+  /// marketplace can filter and sort on it. Null = not disclosed. Never
+  /// derived from annual REVENUE. Kept in sync by refreshListingFinancials().
+  monthlyRevenueMinor    BigInt?
+  /// True only when that latest MRR metric itself is VERIFIED.
+  monthlyRevenueVerified Boolean           @default(false)
+  /// Snapshot of the latest PROFIT metric (monthly profit, minor units).
+  monthlyProfitMinor     BigInt?
+  monthlyProfitVerified  Boolean           @default(false)
   completenessScore Int               @default(0)
   featuredUntil     DateTime?
   publishedAt       DateTime?
@@ -542,6 +553,9 @@ model BusinessListing {
   @@index([status])
   @@index([visibility])
   @@index([askingPriceMinor])
+  @@index([monthlyRevenueMinor])
+  @@index([monthlyProfitMinor])
+  @@index([publishedAt])
   @@map("business_listings")
 }
 
@@ -787,14 +801,22 @@ model OfferRevision {
 // ────────────────────────────────────────────────────────────────────────
 
 model Conversation {
-  id         String   @id @default(uuid())
+  id         String    @id @default(uuid())
   businessId String?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  business   Business? @relation(fields: [businessId], references: [id], onDelete: SetNull)
+  /// Set for buyer -> seller enquiries about a listing. Unique together with
+  /// businessId, so a buyer has exactly one thread per business. Null for
+  /// deal/negotiation conversations.
+  buyerId    String?
+  buyer      User?     @relation("ConversationBuyer", fields: [buyerId], references: [id], onDelete: SetNull)
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   participants ConversationParticipant[]
   messages     Message[]
 
+  @@unique([businessId, buyerId])
+  @@index([businessId])
   @@map("conversations")
 }
 
@@ -825,7 +847,7 @@ model Message {
 
   attachments MessageAttachment[]
 
-  @@index([conversationId])
+  @@index([conversationId, createdAt])
   @@index([senderId])
   @@map("messages")
 }

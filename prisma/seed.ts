@@ -1,5 +1,6 @@
 import { PrismaClient } from '@prisma/client';
 import * as argon2 from 'argon2';
+import { refreshListingFinancials } from '../src/businesses/listing-financials';
 
 const prisma = new PrismaClient();
 
@@ -15,13 +16,11 @@ async function main(): Promise<void> {
   const passwordHash = await argon2.hash(SEED_PASSWORD, { type: argon2.argon2id });
 
   const categories = await Promise.all(
-    ['SaaS', 'AI', 'Mobile App', 'E-commerce', 'Marketplace', 'Agency', 'Newsletter', 'Developer Tool'].map((name) =>
-      prisma.businessCategory.upsert({
-        where: { name },
-        create: { name, slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-') },
-        update: {},
-      }),
-    ),
+    ['SaaS', 'AI', 'Mobile App', 'E-commerce', 'Marketplace', 'Agency', 'Newsletter', 'Developer Tool'].map((name) => {
+      // Keyed by slug: migrations seed categories too (e.g. "E-Commerce" / e-commerce).
+      const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      return prisma.businessCategory.upsert({ where: { slug }, create: { name, slug }, update: {} });
+    }),
   );
 
   await Promise.all(
@@ -115,6 +114,7 @@ async function main(): Promise<void> {
     },
     update: {},
   });
+  await refreshListingFinancials(prisma, business.id);
 
   await prisma.watchlist.upsert({
     where: { userId_businessId: { userId: buyer.id, businessId: business.id } },

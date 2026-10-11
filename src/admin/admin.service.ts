@@ -6,6 +6,7 @@ import { NotificationsService } from '../notifications/notifications.service';
 import { AuthenticatedUser } from '../auth/types/authenticated-user.type';
 import { CursorPaginationQuery } from '../common/dto/pagination.dto';
 import { buildCursorPage } from '../common/utils/cursor-pagination';
+import { serializeListing } from '../businesses/serialize-listing';
 import { ErrorCode } from '../common/constants/error-codes';
 import { NotFoundAppException } from '../common/errors/app.exception';
 
@@ -44,7 +45,15 @@ export class AdminService {
       ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
       include: { listing: true, owner: { select: { id: true, email: true } } },
     });
-    return buildCursorPage(businesses, limit);
+    const page = buildCursorPage(businesses, limit);
+    // Listing money columns are BigInt, which JSON can't serialize.
+    return {
+      ...page,
+      data: page.data.map((b) => ({
+        ...b,
+        listing: b.listing ? serializeListing(b.listing) : null,
+      })),
+    };
   }
 
   async listVerifications(query: CursorPaginationQuery) {
