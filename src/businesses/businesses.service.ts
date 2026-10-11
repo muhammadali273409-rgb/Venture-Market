@@ -206,6 +206,8 @@ export class BusinessesService {
   private async serializeBusiness(business: any) {
     return {
       ...business,
+      // What still has to be filled in before this can be published.
+      missingForPublish: business.listing ? this.calculateCompleteness(business).missing : [],
       images: await serializeImages(this.storageService, business.images),
       listing: business.listing ? this.serializeListing(business.listing) : business.listing,
       metrics: business.metrics
@@ -338,6 +340,7 @@ export class BusinessesService {
       throw new ConflictAppException(
         ErrorCode.LISTING_INCOMPLETE,
         `Listing is missing required fields: ${completeness.missing.join(', ')}`,
+        { missing: completeness.missing },
       );
     }
 
@@ -471,6 +474,7 @@ export class BusinessesService {
       throw new ConflictAppException(
         ErrorCode.LISTING_INCOMPLETE,
         `Listing is missing required fields: ${completeness.missing.join(', ')}`,
+        { missing: completeness.missing },
       );
     }
 

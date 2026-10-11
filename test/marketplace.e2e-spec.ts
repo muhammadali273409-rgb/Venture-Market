@@ -373,6 +373,57 @@ describe('Marketplace & buyer-seller chat (e2e)', () => {
       expect(byName['Alpha AI'].seller).not.toHaveProperty('email');
     });
 
+    it('price bounds are inclusive', async () => {
+      // Alpha is exactly 10 000, Gamma exactly 20 000.
+      const res = await search({
+        q: tok,
+        minPrice: 10_000,
+        maxPrice: 20_000,
+        sortBy: 'price',
+        sortDir: 'asc',
+      });
+      expect(names(res)).toEqual(['Alpha AI', 'Gamma Newsletter']);
+    });
+
+    it('category and asking price are required when creating a listing', async () => {
+      const res = await http()
+        .post('/api/v1/businesses')
+        .set('Cookie', users.seller.cookies)
+        .send({ name: `No price ${tok}`, description: 'x', businessModel: 'SaaS' })
+        .expect(400);
+      expect(JSON.stringify(res.body)).toMatch(/categoryId/);
+      expect(JSON.stringify(res.body)).toMatch(/askingPrice/);
+    });
+
+    it('publishing an incomplete listing names the missing fields', async () => {
+      const draft = await prisma.business.create({
+        data: {
+          ownerId: users.seller.id,
+          name: `Incomplete ${tok}`,
+          slug: `incomplete-${tok}`,
+          businessModel: 'SaaS',
+          listing: { create: {} },
+        },
+      });
+      const owned = await http()
+        .get('/api/v1/businesses')
+        .set('Cookie', users.seller.cookies)
+        .expect(200);
+      const mine = (owned.body.data as Array<{ id: string; missingForPublish: string[] }>).find(
+        (b) => b.id === draft.id,
+      );
+      expect(mine?.missingForPublish).toEqual(['description', 'categoryId', 'askingPrice']);
+
+      const res = await http()
+        .post(`/api/v1/businesses/${draft.id}/publish`)
+        .set('Cookie', users.seller.cookies)
+        .expect(409);
+      expect(res.body.error).toMatchObject({
+        code: 'LISTING_INCOMPLETE',
+        details: { missing: ['description', 'categoryId', 'askingPrice'] },
+      });
+    });
+
     it('a new metric refreshes the listing snapshot', async () => {
       await http()
         .post(`/api/v1/businesses/${biz.alpha}/metrics`)

@@ -27,9 +27,9 @@ export class CreateBusinessDto {
   @MaxLength(5000)
   description?: string;
 
-  @IsOptional()
+  /** Required: a listing can't be published without a category. */
   @IsUUID()
-  categoryId?: string;
+  categoryId!: string;
 
   @IsOptional()
   @IsString()
@@ -65,10 +65,11 @@ export class CreateBusinessDto {
   @MaxLength(200)
   headline?: string;
 
-  @IsOptional()
+  /** Required: a listing can't be published without an asking price. */
   @IsNumber()
   @IsPositive()
-  askingPrice?: number;
+  @Max(1_000_000_000_000)
+  askingPrice!: number;
 
   @IsOptional()
   @IsIn(LISTING_CURRENCIES)

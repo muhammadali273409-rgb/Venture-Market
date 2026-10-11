@@ -107,6 +107,7 @@ describe('Deal flow (e2e)', () => {
         name: `E2E Test Business ${nanoid(6)}`,
         description: 'A test SaaS business for e2e coverage',
         categoryId,
+        askingPrice: 50000,
         businessModel: 'SaaS',
         country: 'US',
       })

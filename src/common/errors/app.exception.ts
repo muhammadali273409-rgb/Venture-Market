@@ -2,8 +2,14 @@ import { HttpException, HttpStatus } from '@nestjs/common';
 import { ErrorCodeValue } from '../constants/error-codes';
 
 export class AppException extends HttpException {
-  constructor(code: ErrorCodeValue, message: string, status: HttpStatus = HttpStatus.BAD_REQUEST) {
-    super({ error: { code, message } }, status);
+  /** `details` is optional machine-readable context (e.g. the missing fields). */
+  constructor(
+    code: ErrorCodeValue,
+    message: string,
+    status: HttpStatus = HttpStatus.BAD_REQUEST,
+    details?: unknown,
+  ) {
+    super({ error: { code, message, ...(details !== undefined ? { details } : {}) } }, status);
   }
 }
 
@@ -20,8 +26,8 @@ export class ForbiddenAppException extends AppException {
 }
 
 export class ConflictAppException extends AppException {
-  constructor(code: ErrorCodeValue, message: string) {
-    super(code, message, HttpStatus.CONFLICT);
+  constructor(code: ErrorCodeValue, message: string, details?: unknown) {
+    super(code, message, HttpStatus.CONFLICT, details);
   }
 }
 
