@@ -395,6 +395,18 @@ describe('Marketplace & buyer-seller chat (e2e)', () => {
       expect(JSON.stringify(res.body)).toMatch(/askingPrice/);
     });
 
+    it('country must be a Latin 2-letter code (a Cyrillic "Т" is rejected)', async () => {
+      const { id: categoryId } = await prisma.businessCategory.findUniqueOrThrow({ where: { slug: catA } });
+      const create = (country: string) =>
+        http()
+          .post('/api/v1/businesses')
+          .set('Cookie', users.seller.cookies)
+          .send({ name: `Country ${tok}`, categoryId, askingPrice: 1, country });
+      await create('ТJ').expect(400);
+      const ok = await create('tj').expect(201);
+      expect(ok.body.data.country).toBe('TJ');
+    });
+
     it('publishing an incomplete listing names the missing fields', async () => {
       const draft = await prisma.business.create({
         data: {

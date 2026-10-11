@@ -1,3 +1,4 @@
+import { Transform } from 'class-transformer';
 import {
   IsIn,
   IsISO8601,
@@ -8,6 +9,7 @@ import {
   IsUrl,
   IsUUID,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
@@ -40,9 +42,10 @@ export class CreateBusinessDto {
   @IsISO8601()
   foundedAt?: string;
 
+  /** ISO 3166-1 alpha-2, Latin letters only (a Cyrillic "Т" looks like "T" but never matches a filter). */
   @IsOptional()
-  @IsString()
-  @MaxLength(2)
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toUpperCase() : value))
+  @Matches(/^[A-Z]{2}$/, { message: 'country must be a 2-letter Latin country code, e.g. TJ' })
   country?: string;
 
   @IsOptional()
