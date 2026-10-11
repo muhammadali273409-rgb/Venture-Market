@@ -33,4 +33,7 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/prisma ./prisma
 USER node
 EXPOSE 3000
-CMD ["node", "dist/main.js"]
+# Apply pending migrations on every start (Render free plan has no pre-deploy
+# step). migrate deploy only runs unapplied migrations and never resets data;
+# if it fails, the app does not start, so the old instance keeps serving.
+CMD ["sh", "-c", "./node_modules/.bin/prisma migrate deploy && node dist/main.js"]
