@@ -44,10 +44,28 @@ function setup(
     $queryRaw: jest.fn().mockResolvedValue([]),
   };
   const notifications = { create: jest.fn() };
+  const realtime = { emitToUsers: jest.fn() };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const service = new ConversationsService(prisma as any, notifications as any);
-  return { service, prisma, notifications };
+  const service = new ConversationsService(prisma as any, notifications as any, realtime as any);
+  return { service, prisma, notifications, realtime };
 }
+
+describe('ConversationsService.sendMessage', () => {
+  it('pushes the stored message live to every participant, sender included', async () => {
+    const { service, realtime } = setup();
+    const message = await service.sendMessage(buyer, 'conv-1', { body: 'Hello' });
+    expect(realtime.emitToUsers).toHaveBeenCalledWith([buyer.id, seller.id], 'message.new', {
+      conversationId: 'conv-1',
+      message,
+    });
+  });
+
+  it('does not push anything when the sender is not a participant', async () => {
+    const { service, realtime } = setup({ participant: false });
+    await expect(service.sendMessage(outsider, 'conv-1', { body: 'Hi' })).rejects.toThrow();
+    expect(realtime.emitToUsers).not.toHaveBeenCalled();
+  });
+});
 
 describe('ConversationsService.startForBusiness', () => {
   it('takes the seller from the business record and creates one thread with both people', async () => {

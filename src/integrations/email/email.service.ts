@@ -1,25 +1,35 @@
 import { Inject, Injectable } from '@nestjs/common';
 import { EMAIL_PROVIDER, EmailProvider } from './email-provider.interface';
 
+function trimSlash(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 @Injectable()
 export class EmailService {
   constructor(@Inject(EMAIL_PROVIDER) private readonly provider: EmailProvider) {}
 
-  sendVerificationEmail(to: string, token: string, appUrl: string): Promise<void> {
+  // `frontendUrl` is FRONTEND_URL; the pages live at /verify-email and
+  // /reset-password (the frontend's (auth) route group adds no URL segment).
+  sendVerificationEmail(to: string, token: string, frontendUrl: string): Promise<void> {
     return this.provider.send({
       to,
-      subject: 'Verify your VentureMarket account',
+      subject: 'Почтаи худро тасдиқ кунед · Verify your VentureMarket account',
       template: 'verification',
-      variables: { link: `${appUrl}/auth/verify-email?token=${token}` },
+      variables: {
+        link: `${trimSlash(frontendUrl)}/verify-email?token=${encodeURIComponent(token)}`,
+      },
     });
   }
 
-  sendPasswordResetEmail(to: string, token: string, appUrl: string): Promise<void> {
+  sendPasswordResetEmail(to: string, token: string, frontendUrl: string): Promise<void> {
     return this.provider.send({
       to,
-      subject: 'Reset your VentureMarket password',
+      subject: 'Барқарор кардани парол · Reset your VentureMarket password',
       template: 'password-reset',
-      variables: { link: `${appUrl}/auth/reset-password?token=${token}` },
+      variables: {
+        link: `${trimSlash(frontendUrl)}/reset-password?token=${encodeURIComponent(token)}`,
+      },
     });
   }
 

@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import { OAuth2Client, TokenPayload } from 'google-auth-library';
@@ -18,6 +18,9 @@ import {
 } from '../common/errors/app.exception';
 import { RegisterDto } from './dto/register.dto';
 import { JwtPayload } from './strategies/jwt.strategy';
+import { SOCKET_TOKEN_TTL, SOCKET_TOKEN_TYPE, SocketTokenPayload } from './socket-token';
+
+const RESEND_COOLDOWN_MS = 60 * 1000;
 
 export interface AuthTokens {
   accessToken: string;
@@ -36,6 +39,7 @@ export class AuthService {
   // only to validate its signature/issuer/audience/expiry against Google's
   // public keys. The audience (our client ID) is passed per-call below.
   private readonly googleClient = new OAuth2Client();
+  private readonly logger = new Logger(AuthService.name);
 
   constructor(
     private readonly prisma: PrismaService,
@@ -405,11 +409,16 @@ export class AuthService {
       data: { userId: user.id, tokenHash: hash, expiresAt: new Date(Date.now() + 60 * 60 * 1000) },
     });
 
-    await this.emailService.sendPasswordResetEmail(
-      user.email,
-      raw,
-      this.configService.get('appUrl', { infer: true }),
-    );
+    // Logged, not thrown: a failure only for existing accounts would reveal which emails exist.
+    await this.emailService
+      .sendPasswordResetEmail(
+        user.email,
+        raw,
+        this.configService.get('frontendUrl', { infer: true }),
+      )
+      .catch((error: unknown) =>
+        this.logger.error(`Password reset email to ${user.email} failed`, error),
+      );
   }
 
   async resetPassword(rawToken: string, newPassword: string): Promise<void> {
@@ -445,6 +454,14 @@ export class AuthService {
     });
   }
 
+  issueSocketToken(userId: string): Promise<string> {
+    const payload: SocketTokenPayload = { sub: userId, typ: SOCKET_TOKEN_TYPE };
+    return this.jwtService.signAsync(payload, {
+      secret: this.configService.get('auth', { infer: true }).jwtSecret,
+      expiresIn: SOCKET_TOKEN_TTL,
+    });
+  }
+
   async getMe(userId: string) {
     const user = await this.prisma.user.findUnique({
       where: { id: userId },
@@ -464,16 +481,39 @@ export class AuthService {
     };
   }
 
+  /**
+   * Sends a fresh verification link. Always resolves the same way whether or
+   * not the account exists, so it can't be used to probe for emails.
+   */
+  async resendVerification(email: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user || user.deletedAt || user.emailVerifiedAt) return;
+
+    // At most one email per minute per account, so nobody can flood an inbox.
+    const recent = await this.prisma.emailVerificationToken.findFirst({
+      where: { userId: user.id, createdAt: { gt: new Date(Date.now() - RESEND_COOLDOWN_MS) } },
+      select: { id: true },
+    });
+    if (recent) return;
+
+    // Only the newest link works.
+    await this.prisma.emailVerificationToken.updateMany({
+      where: { userId: user.id, usedAt: null },
+      data: { usedAt: new Date() },
+    });
+    await this.issueEmailVerificationToken(user.id, user.email);
+  }
+
   private async issueEmailVerificationToken(userId: string, email: string): Promise<void> {
     const { raw, hash } = generateOpaqueToken();
     await this.prisma.emailVerificationToken.create({
       data: { userId, tokenHash: hash, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000) },
     });
-    await this.emailService.sendVerificationEmail(
-      email,
-      raw,
-      this.configService.get('appUrl', { infer: true }),
-    );
+    // A delivery failure must not fail sign-up (the account already exists);
+    // the user can ask for a new link from the app.
+    await this.emailService
+      .sendVerificationEmail(email, raw, this.configService.get('frontendUrl', { infer: true }))
+      .catch((error: unknown) => this.logger.error(`Verification email to ${email} failed`, error));
   }
 
   private async issueTokenPair(

@@ -1,5 +1,5 @@
 import { EnvConfig } from './env.validation';
- 
+
 export function buildConfiguration(env: EnvConfig) {
   return {
     nodeEnv: env.NODE_ENV,
@@ -29,6 +29,7 @@ export function buildConfiguration(env: EnvConfig) {
       secretAccessKey: env.STORAGE_SECRET_KEY,
       forcePathStyle: env.STORAGE_FORCE_PATH_STYLE,
       signedUrlTtlSeconds: env.STORAGE_SIGNED_URL_TTL_SECONDS,
+      serverSideEncryption: env.STORAGE_SSE,
     },
     email: {
       provider: env.EMAIL_PROVIDER,
@@ -55,5 +56,5 @@ export function buildConfiguration(env: EnvConfig) {
     },
   };
 }
- 
+
 export type AppConfiguration = ReturnType<typeof buildConfiguration>;

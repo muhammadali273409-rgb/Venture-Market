@@ -22,6 +22,7 @@ import { LoginDto } from './dto/login.dto';
 import { GoogleLoginDto } from './dto/google-login.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
+import { ResendVerificationDto } from './dto/resend-verification.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
 import { parseDurationMs } from '../common/utils/duration';
 
@@ -126,6 +127,17 @@ export class AuthController {
   }
 
   @Public()
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @HttpCode(HttpStatus.OK)
+  @Post('resend-verification')
+  resendVerification(@Body() dto: ResendVerificationDto) {
+    return this.authService.resendVerification(dto.email).then(() => ({
+      success: true,
+      message: 'If that account exists and is not verified yet, a new link has been sent.',
+    }));
+  }
+
+  @Public()
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @HttpCode(HttpStatus.OK)
   @Post('forgot-password')
@@ -144,6 +156,12 @@ export class AuthController {
     return this.authService
       .resetPassword(dto.token, dto.newPassword)
       .then(() => ({ success: true }));
+  }
+
+  /** Short-lived token for the realtime Socket.IO handshake — see socket-token.ts. */
+  @Get('socket-token')
+  socketToken(@CurrentUser() user: AuthenticatedUser) {
+    return this.authService.issueSocketToken(user.id).then((token) => ({ token }));
   }
 
   @Get('me')

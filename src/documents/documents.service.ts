@@ -134,9 +134,11 @@ export class DocumentsService {
 
   async getSignedDownloadUrl(user: AuthenticatedUser, documentId: string) {
     const document = await this.getAccessibleDocument(user, documentId);
-    const url = await this.storageService.getSignedDownloadUrl(document.storageKey);
+    const url = await this.storageService.getSignedDownloadUrl(document.storageKey, {
+      downloadAs: document.name,
+    });
     await this.logAccess(document.id, user.id, 'DOWNLOADED');
-    return { url, expiresInSeconds: 300 };
+    return { url, expiresInSeconds: this.storageService.signedUrlTtlSeconds };
   }
 
   async grantAccess(user: AuthenticatedUser, documentId: string, dto: GrantAccessDto) {

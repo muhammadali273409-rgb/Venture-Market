@@ -9,6 +9,6 @@ import { NotificationsGateway } from './notifications.gateway';
   imports: [QueueModule, JwtModule.register({})],
   controllers: [NotificationsController],
   providers: [NotificationsService, NotificationsGateway],
-  exports: [NotificationsService],
+  exports: [NotificationsService, NotificationsGateway],
 })
 export class NotificationsModule {}

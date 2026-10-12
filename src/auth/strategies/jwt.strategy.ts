@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { Request } from 'express';
 import { AppConfiguration } from '../../config/configuration';
 import { AuthenticatedUser } from '../types/authenticated-user.type';
+import { SOCKET_TOKEN_TYPE } from '../socket-token';
 
 export interface JwtPayload {
   sub: string;
@@ -30,7 +31,11 @@ export class JwtStrategy extends PassportStrategy(Strategy, 'jwt') {
     });
   }
 
-  validate(payload: JwtPayload): AuthenticatedUser {
+  validate(payload: JwtPayload & { typ?: string }): AuthenticatedUser {
+    // Socket handshake tokens share the signing secret but must never act as access tokens.
+    if (payload.typ === SOCKET_TOKEN_TYPE) {
+      throw new UnauthorizedException();
+    }
     return { id: payload.sub, email: payload.email, role: payload.role };
   }
 }

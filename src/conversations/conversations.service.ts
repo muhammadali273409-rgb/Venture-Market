@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { NotificationsGateway } from '../notifications/notifications.gateway';
 import { ErrorCode } from '../common/constants/error-codes';
 import { BUYER_ROLES } from '../common/constants/roles';
 import { ForbiddenAppException, NotFoundAppException } from '../common/errors/app.exception';
@@ -39,6 +40,7 @@ export class ConversationsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notificationsService: NotificationsService,
+    private readonly realtime: NotificationsGateway,
   ) {}
 
   /**
@@ -229,6 +231,14 @@ export class ConversationsService {
       where: { conversationId, userId: { not: senderId } },
       select: { userId: true },
     });
+
+    // Live delivery — to the sender too, so their other open tabs update.
+    this.realtime.emitToUsers(
+      [senderId, ...otherParticipants.map((p) => p.userId)],
+      'message.new',
+      { conversationId, message },
+    );
+
     for (const participant of otherParticipants) {
       await this.notificationsService.create({
         userId: participant.userId,
