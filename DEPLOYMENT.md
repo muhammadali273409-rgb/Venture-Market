@@ -76,6 +76,7 @@ option for the three `*_SECRET` values.
 
 ## Health checks
 
+- `GET /live` — liveness at the root, outside `API_PREFIX`, no DB check. **Use this as Render's Health Check Path.**
 - `GET /api/v1/health` — liveness (process is up)
 - `GET /api/v1/ready` — readiness (pings PostgreSQL via `@nestjs/terminus`)
 

@@ -1,7 +1,7 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { ValidationPipe } from '@nestjs/common';
+import { BadRequestException, ValidationError, ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { Logger } from 'nestjs-pino';
@@ -10,6 +10,19 @@ import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { AppConfiguration } from './config/configuration';
 import { SocketIoAdapter } from './common/adapters/socket-io.adapter';
+
+/** `{ "profile.firstName": "firstName must be shorter than..." }` — first failed constraint per field. */
+function flattenValidationErrors(errors: ValidationError[], parent = ''): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const error of errors) {
+    const path = parent ? `${parent}.${error.property}` : error.property;
+    const first = error.constraints ? Object.values(error.constraints)[0] : undefined;
+    if (first) fields[path] = first;
+    if (error.children?.length)
+      Object.assign(fields, flattenValidationErrors(error.children, path));
+  }
+  return fields;
+}
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
@@ -39,7 +52,8 @@ async function bootstrap(): Promise<void> {
 
   app.useWebSocketAdapter(new SocketIoAdapter(app, frontendUrl));
 
-  app.setGlobalPrefix(configService.get('apiPrefix', { infer: true }));
+  // `/live` stays at the root so the Render health check path doesn't depend on API_PREFIX.
+  app.setGlobalPrefix(configService.get('apiPrefix', { infer: true }), { exclude: ['live'] });
 
   app.useGlobalPipes(
     new ValidationPipe({
@@ -47,6 +61,17 @@ async function bootstrap(): Promise<void> {
       transform: true,
       forbidNonWhitelisted: true,
       transformOptions: { enableImplicitConversion: true },
+      // Same 400 body as Nest's default (`message: string[]`), plus `fields`
+      // keyed by property so clients can show each error under its input.
+      exceptionFactory: (errors) => {
+        const fields = flattenValidationErrors(errors);
+        return new BadRequestException({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: Object.values(fields),
+          fields,
+        });
+      },
     }),
   );
 

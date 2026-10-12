@@ -66,7 +66,7 @@ docker compose up --build
 ```
 
 Swagger UI: `http://localhost:3000/docs` (development/test only — disabled in production).
-Health checks: `GET /api/v1/health` (liveness), `GET /api/v1/ready` (readiness, pings the DB).
+Health checks: `GET /live` (liveness, unprefixed — Render health check path), `GET /api/v1/health` (liveness), `GET /api/v1/ready` (readiness, pings the DB).
 
 ### 5. Test
 
