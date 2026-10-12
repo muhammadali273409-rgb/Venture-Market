@@ -62,14 +62,21 @@ option for the three `*_SECRET` values.
 |---|---|---|
 | `DATABASE_URL` | yes | Render PostgreSQL connection string (Internal URL if the DB is on the same Render account/region) |
 | `REDIS_URL` | yes | required eagerly at boot — `QueueModule` (BullMQ, `src/jobs/queue.module.ts`) connects on startup, not lazily |
-| `APP_URL` | no | base URL used to build the **frontend** links sent in verification/reset emails (`${APP_URL}/auth/verify-email?token=...`) — set this to the frontend's URL, not the backend's own Render URL |
-| `FRONTEND_URL` | no | used for CORS `origin` (`src/main.ts`) — must exactly match the deployed frontend's origin |
+| `APP_URL` | no | this API's own public URL |
+| `FRONTEND_URL` | no | used for CORS `origin` (`src/main.ts`) and as the base of email links (`${FRONTEND_URL}/verify-email?token=...`, `/reset-password`) — must exactly match the deployed frontend's origin |
 | `JWT_SECRET` | yes | signs access tokens (`JwtModule`, `JwtStrategy`) — min 16 chars |
 | `JWT_REFRESH_SECRET` | yes | validated at boot but not currently used to sign anything — refresh tokens are opaque, DB-hashed (`src/auth/token.service.ts`), not JWTs. Still required by the schema; use a distinct strong value |
 | `COOKIE_SECRET` | yes | signs the `access_token`/`refresh_token` cookies (`cookie-parser`, `src/main.ts`) — min 16 chars |
-| `STORAGE_ENDPOINT` | no | S3-compatible endpoint (`StorageService`, `@aws-sdk/client-s3`) — any provider works: AWS S3, Cloudflare R2, MinIO, etc. |
+| `STORAGE_ENDPOINT` | no | S3-compatible endpoint (`StorageService`, `@aws-sdk/client-s3`). Production: Cloudflare R2, `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`. In production the app **refuses to boot** if this points to localhost/MinIO or isn't https |
+| `STORAGE_REGION` | no | `auto` for R2 |
 | `STORAGE_BUCKET` | no | bucket name, must already exist and not be publicly readable |
-| `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | yes | credentials for the bucket above |
+| `STORAGE_ACCESS_KEY` / `STORAGE_SECRET_KEY` | yes | R2 → Manage API tokens → *Object Read & Write*, scoped to the bucket. The `changeme` placeholders are rejected in production |
+| `STORAGE_SIGNED_URL_TTL_SECONDS` | no | lifetime of download links, 30–3600 (default 300) |
+
+Render's free plan has no persistent disk, so files are never stored on the server: every
+upload goes to the private bucket and downloads use short-lived signed URLs. MinIO
+(`docker compose up`) is for local development only. If the bucket is unreachable, uploads
+return `503 STORAGE_UNAVAILABLE` and the boot log shows `Storage check FAILED ...` with the cause.
 
 `PORT` is provided automatically by Render — do not set it manually; the app already reads
 `process.env.PORT` (default `3000`) via `src/main.ts`.

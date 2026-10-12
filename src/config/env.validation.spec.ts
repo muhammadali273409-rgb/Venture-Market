@@ -34,3 +34,39 @@ describe('envSchema', () => {
     expect(envSchema.safeParse({ ...base, JWT_ACCESS_TTL: '15m' }).success).toBe(true);
   });
 });
+
+describe('envSchema production storage checks', () => {
+  const r2 = {
+    ...base,
+    NODE_ENV: 'production',
+    STORAGE_ENDPOINT: 'https://abc123.r2.cloudflarestorage.com',
+    STORAGE_ACCESS_KEY: 'a1b2c3',
+    STORAGE_SECRET_KEY: 'd4e5f6',
+  };
+  const messages = (env: Record<string, unknown>) => {
+    const result = envSchema.safeParse(env);
+    return result.success
+      ? []
+      : result.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
+  };
+
+  it('accepts a real R2 endpoint', () => {
+    expect(messages(r2)).toEqual([]);
+  });
+
+  it('refuses to boot with the local MinIO endpoint', () => {
+    expect(messages({ ...r2, STORAGE_ENDPOINT: 'http://localhost:9000' })).toEqual([
+      expect.stringMatching(/^STORAGE_ENDPOINT: points to localhost.*R2/),
+    ]);
+  });
+
+  it('refuses placeholder keys from .env.example', () => {
+    expect(
+      messages({ ...r2, STORAGE_ACCESS_KEY: 'changeme', STORAGE_SECRET_KEY: 'changeme' }),
+    ).toHaveLength(2);
+  });
+
+  it('still allows local MinIO outside production', () => {
+    expect(messages({ ...base, STORAGE_ENDPOINT: 'http://localhost:9000' })).toEqual([]);
+  });
+});
