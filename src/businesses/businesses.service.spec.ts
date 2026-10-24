@@ -91,13 +91,18 @@ describe('BusinessesService.publish', () => {
 
   it('refuses an incomplete listing and names the missing fields', async () => {
     const { service, prisma } = setup(
-      makeBusiness({ description: null, listing: { askingPriceMinor: null, visibility: 'PRIVATE' } }),
+      makeBusiness({
+        description: null,
+        listing: { askingPriceMinor: null, visibility: 'PRIVATE' },
+      }),
     );
 
     await expect(service.publish(seller, 'biz-1')).rejects.toMatchObject({
       response: { error: { code: 'LISTING_INCOMPLETE' } },
     });
-    await expect(service.publish(seller, 'biz-1')).rejects.toMatchObject(errorMessage(/description, askingPrice/));
+    await expect(service.publish(seller, 'biz-1')).rejects.toMatchObject(
+      errorMessage(/description, askingPrice/),
+    );
     expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 
@@ -132,7 +137,9 @@ describe('BusinessesService.softDelete', () => {
 
   it('requires a seller to unpublish a live listing first', async () => {
     const { service } = setup(makeBusiness({ status: 'PUBLISHED' }));
-    await expect(service.softDelete(seller, 'biz-1')).rejects.toMatchObject(errorMessage(/Unpublish/));
+    await expect(service.softDelete(seller, 'biz-1')).rejects.toMatchObject(
+      errorMessage(/Unpublish/),
+    );
   });
 
   it('lets an admin delete a live listing', async () => {
@@ -149,7 +156,12 @@ describe('BusinessesService.softDelete', () => {
 });
 
 describe('BusinessesService.uploadImage', () => {
-  const png = { originalname: 'logo.png', mimetype: 'image/png', size: 1000, buffer: Buffer.from('x') };
+  const png = {
+    originalname: 'logo.png',
+    mimetype: 'image/png',
+    size: 1000,
+    buffer: Buffer.from('x'),
+  };
 
   it('rejects non-image files before touching storage', async () => {
     const { service, storage } = setup(makeBusiness());
