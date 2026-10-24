@@ -24,6 +24,7 @@ import { CreateTaskDto } from './dto/create-task.dto';
 import { UpdateTaskStatusDto } from './dto/update-task-status.dto';
 import { AddParticipantDto } from './dto/add-participant.dto';
 import { UpdateDealStatusDto } from './dto/update-deal-status.dto';
+import { toMajorUnits } from '../common/utils/money';
 
 /**
  * Deal lifecycle. Which *actor* may drive each edge is decided separately in
@@ -135,15 +136,20 @@ export class DealsService {
 
   async getOne(user: AuthenticatedUser, dealId: string) {
     await this.assertParticipant(user.id, dealId);
-    return this.prisma.deal.findUnique({
+    const deal = await this.prisma.deal.findUnique({
       where: { id: dealId },
       include: {
         business: true,
+        acceptedOffer: { select: { amountMinor: true, currency: true } },
         participants: { include: { user: { select: PARTICIPANT_USER_SELECT } } },
         tasks: { orderBy: { createdAt: 'desc' } },
         timelineEvents: { orderBy: { createdAt: 'desc' } },
       },
     });
+    if (!deal) return deal;
+    // The price both parties agreed on — shown at the payment stage. BigInt isn't JSON.
+    const { amountMinor, currency } = deal.acceptedOffer;
+    return { ...deal, acceptedOffer: { amount: toMajorUnits(amountMinor), currency } };
   }
 
   /**
@@ -501,11 +507,25 @@ export class DealsService {
         if (role !== 'BUYER') {
           forbid('Only the buyer can close due diligence');
         }
+        // Closing an empty checklist would skip due diligence entirely.
+        const totalItems = await this.prisma.dueDiligenceItem.count({
+          where: { request: { dealId } },
+        });
+        if (totalItems === 0) {
+          throw new ConflictAppException(
+            ErrorCode.DUE_DILIGENCE_NO_ITEMS,
+            'Add at least one due diligence item before closing due diligence',
+          );
+        }
         const openItems = await this.prisma.dueDiligenceItem.count({
           where: { request: { dealId }, status: { in: OPEN_DUE_DILIGENCE_STATUSES } },
         });
         if (openItems > 0) {
-          conflict(`${openItems} due diligence item(s) are still open`);
+          throw new ConflictAppException(
+            ErrorCode.DUE_DILIGENCE_ITEMS_OPEN,
+            `${openItems} due diligence item(s) are still open`,
+            { openItems },
+          );
         }
         return;
       }

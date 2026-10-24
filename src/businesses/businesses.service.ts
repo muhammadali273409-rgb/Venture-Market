@@ -211,7 +211,9 @@ export class BusinessesService {
       images: await serializeImages(this.storageService, business.images),
       listing: business.listing ? this.serializeListing(business.listing) : business.listing,
       metrics: business.metrics
-        ? business.metrics.map((m: any) => this.serializeMetric(m))
+        ? business.metrics.map((m: Parameters<typeof this.serializeMetric>[0]) =>
+            this.serializeMetric(m),
+          )
         : undefined,
     };
   }

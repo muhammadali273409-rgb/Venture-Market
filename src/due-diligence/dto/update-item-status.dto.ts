@@ -1,4 +1,4 @@
-import { IsIn, IsOptional, IsUUID } from 'class-validator';
+import { IsIn, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 import { DueDiligenceStatus } from '@prisma/client';
 
 const STATUSES: DueDiligenceStatus[] = [
@@ -18,4 +18,10 @@ export class UpdateItemStatusDto {
   @IsOptional()
   @IsUUID()
   documentId?: string;
+
+  /** Seller side's written answer to the item. */
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  response?: string;
 }

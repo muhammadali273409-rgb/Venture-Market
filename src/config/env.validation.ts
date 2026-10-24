@@ -107,6 +107,14 @@ export const envSchema = z
     STRIPE_SECRET_KEY: z.string().optional().default(''),
     STRIPE_WEBHOOK_SECRET: z.string().optional().default(''),
 
+    // How a deal buyer pays. 'manual': the buyer pays outside the platform
+    // (bank transfer, escrow) and an admin confirms the funds arrived; works
+    // where Stripe is unavailable (e.g. Tajikistan). 'stripe': Stripe Checkout,
+    // confirmed by the webhook — needs STRIPE_SECRET_KEY/STRIPE_WEBHOOK_SECRET.
+    PAYMENT_PROVIDER: z.enum(['manual', 'stripe']).default('manual'),
+    // Shown to the buyer in the deal room when PAYMENT_PROVIDER=manual.
+    PAYMENT_MANUAL_INSTRUCTIONS: z.string().optional().default(''),
+
     // Optional: "Continue with Google" is disabled (endpoint returns a config
     // error) whenever this is unset, so it's safe to leave blank in envs that
     // don't need it.

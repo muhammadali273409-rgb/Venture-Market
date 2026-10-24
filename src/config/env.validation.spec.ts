@@ -29,6 +29,14 @@ describe('envSchema', () => {
     expect(envSchema.parse(base).STORAGE_FORCE_PATH_STYLE).toBe(true);
   });
 
+  it('defaults deal payments to the manual (admin-confirmed) provider', () => {
+    expect(envSchema.parse(base).PAYMENT_PROVIDER).toBe('manual');
+    expect(envSchema.parse({ ...base, PAYMENT_PROVIDER: 'stripe' }).PAYMENT_PROVIDER).toBe(
+      'stripe',
+    );
+    expect(envSchema.safeParse({ ...base, PAYMENT_PROVIDER: 'paypal' }).success).toBe(false);
+  });
+
   it('rejects a malformed JWT_ACCESS_TTL', () => {
     expect(envSchema.safeParse({ ...base, JWT_ACCESS_TTL: '15mgit ' }).success).toBe(false);
     expect(envSchema.safeParse({ ...base, JWT_ACCESS_TTL: '15m' }).success).toBe(true);

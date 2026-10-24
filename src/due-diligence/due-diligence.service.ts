@@ -1,10 +1,14 @@
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import { DueDiligenceStatus } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { BUYER_SIDE_ROLES, DealsService, SELLER_SIDE_ROLES } from '../deals/deals.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { ErrorCode } from '../common/constants/error-codes';
-import { ForbiddenAppException, NotFoundAppException } from '../common/errors/app.exception';
+import {
+  AppException,
+  ForbiddenAppException,
+  NotFoundAppException,
+} from '../common/errors/app.exception';
 import { AuthenticatedUser } from '../auth/types/authenticated-user.type';
 import { CreateDueDiligenceRequestDto } from './dto/create-request.dto';
 import { UpdateItemStatusDto } from './dto/update-item-status.dto';
@@ -115,12 +119,27 @@ export class DueDiligenceService {
         'Only the seller side attaches documents to due diligence items',
       );
     }
+    const response = dto.response?.trim() || undefined;
+    if (response && !isSellerSide) {
+      throw new ForbiddenAppException(
+        ErrorCode.DEAL_ACCESS_DENIED,
+        'Only the seller side answers due diligence items',
+      );
+    }
 
     const item = await this.prisma.dueDiligenceItem.findFirst({
       where: { id: itemId, request: { dealId } },
     });
     if (!item) {
       throw new NotFoundAppException(ErrorCode.NOT_FOUND, 'Due diligence item not found');
+    }
+    // An answer with neither text nor a document gives the buyer nothing to review.
+    if (isSellerSide && !response && !dto.documentId && !item.response && !item.documentId) {
+      throw new AppException(
+        ErrorCode.VALIDATION_ERROR,
+        'Write an answer or attach a document',
+        HttpStatus.BAD_REQUEST,
+      );
     }
 
     if (dto.documentId) {
@@ -129,7 +148,7 @@ export class DueDiligenceService {
 
     const updated = await this.prisma.dueDiligenceItem.update({
       where: { id: itemId },
-      data: { status: dto.status, documentId: dto.documentId },
+      data: { status: dto.status, documentId: dto.documentId, response },
     });
 
     await this.dealsService.addTimelineEvent(dealId, 'DUE_DILIGENCE_ITEM_UPDATED', user.id, {

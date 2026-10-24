@@ -970,6 +970,8 @@ model DueDiligenceItem {
   description String
   status      DueDiligenceStatus  @default(REQUESTED)
   documentId  String?
+  /// Seller's written answer to the item, alongside or instead of a document.
+  response    String?
   createdAt   DateTime            @default(now())
   updatedAt   DateTime            @updatedAt
 
@@ -1005,6 +1007,8 @@ model AgreementVersion {
   version      Int
   contentUrl   String?
   contentHash  String?
+  /// Deal document holding this version's file (PDF), when uploaded rather than linked.
+  documentId   String?
   createdById  String
   createdAt    DateTime  @default(now())
 
