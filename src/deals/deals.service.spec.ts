@@ -183,3 +183,16 @@ describe('DealsService — transfer and receipt', () => {
     });
   });
 });
+
+describe('DealsService.getOne', () => {
+  it('returns the agreed price as JSON-safe major units', async () => {
+    const { service, prisma } = setup();
+    (prisma.deal.findUnique as jest.Mock).mockResolvedValue({
+      id: 'deal-1',
+      acceptedOffer: { amountMinor: 5_000_000n, currency: 'USD' },
+    });
+    const deal = await service.getOne(buyer, 'deal-1');
+    expect(deal?.acceptedOffer).toEqual({ amount: 50000, currency: 'USD' });
+    expect(() => JSON.stringify(deal)).not.toThrow();
+  });
+});
