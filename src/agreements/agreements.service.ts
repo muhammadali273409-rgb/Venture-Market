@@ -1,9 +1,13 @@
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import { DealParticipantRole } from '@prisma/client';
 import { PrismaService } from '../database/prisma.service';
 import { DealsService, PRINCIPAL_ROLES } from '../deals/deals.service';
 import { ErrorCode } from '../common/constants/error-codes';
-import { ConflictAppException, NotFoundAppException } from '../common/errors/app.exception';
+import {
+  AppException,
+  ConflictAppException,
+  NotFoundAppException,
+} from '../common/errors/app.exception';
 import { AuthenticatedUser } from '../auth/types/authenticated-user.type';
 import { CreateAgreementDto } from './dto/create-agreement.dto';
 import { CreateAgreementVersionDto } from './dto/create-version.dto';
@@ -53,6 +57,7 @@ export class AgreementsService {
     return this.prisma.agreement.findMany({
       where: { dealId },
       include: { versions: { include: { signatures: true }, orderBy: { version: 'desc' } } },
+      orderBy: { createdAt: 'desc' },
     });
   }
 
@@ -81,6 +86,27 @@ export class AgreementsService {
       );
     }
 
+    if (!dto.contentUrl && !dto.documentId) {
+      throw new AppException(
+        ErrorCode.VALIDATION_ERROR,
+        'Attach the agreement file or a link to it',
+        HttpStatus.BAD_REQUEST,
+      );
+    }
+    if (dto.documentId) {
+      // The file must be a deal document both parties can open — a version
+      // nobody else can read can't be meaningfully signed.
+      const document = await this.prisma.businessDocument.findFirst({
+        where: { id: dto.documentId, dealId, deletedAt: null, visibility: { not: 'PRIVATE' } },
+      });
+      if (!document) {
+        throw new NotFoundAppException(
+          ErrorCode.DOCUMENT_NOT_FOUND,
+          'Document not found in this deal',
+        );
+      }
+    }
+
     const latest = await this.prisma.agreementVersion.findFirst({
       where: { agreementId },
       orderBy: { version: 'desc' },
@@ -91,7 +117,8 @@ export class AgreementsService {
         agreementId,
         version: (latest?.version ?? 0) + 1,
         contentUrl: dto.contentUrl,
-        contentHash: dto.contentHash,
+        contentHash: dto.contentHash?.toLowerCase(),
+        documentId: dto.documentId,
         createdById: user.id,
       },
     });
