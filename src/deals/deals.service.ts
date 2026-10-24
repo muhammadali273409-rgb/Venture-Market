@@ -501,11 +501,25 @@ export class DealsService {
         if (role !== 'BUYER') {
           forbid('Only the buyer can close due diligence');
         }
+        // Closing an empty checklist would skip due diligence entirely.
+        const totalItems = await this.prisma.dueDiligenceItem.count({
+          where: { request: { dealId } },
+        });
+        if (totalItems === 0) {
+          throw new ConflictAppException(
+            ErrorCode.DUE_DILIGENCE_NO_ITEMS,
+            'Add at least one due diligence item before closing due diligence',
+          );
+        }
         const openItems = await this.prisma.dueDiligenceItem.count({
           where: { request: { dealId }, status: { in: OPEN_DUE_DILIGENCE_STATUSES } },
         });
         if (openItems > 0) {
-          conflict(`${openItems} due diligence item(s) are still open`);
+          throw new ConflictAppException(
+            ErrorCode.DUE_DILIGENCE_ITEMS_OPEN,
+            `${openItems} due diligence item(s) are still open`,
+            { openItems },
+          );
         }
         return;
       }
