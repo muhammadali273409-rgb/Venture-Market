@@ -47,6 +47,10 @@ export function buildConfiguration(env: EnvConfig) {
       secretKey: env.STRIPE_SECRET_KEY,
       webhookSecret: env.STRIPE_WEBHOOK_SECRET,
     },
+    payments: {
+      provider: env.PAYMENT_PROVIDER,
+      manualInstructions: env.PAYMENT_MANUAL_INSTRUCTIONS,
+    },
     google: {
       clientId: env.GOOGLE_CLIENT_ID,
     },

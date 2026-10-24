@@ -12,10 +12,15 @@ import { verifyStripeSignature } from './stripe-signature.util';
 interface StripeEventLike {
   id: string;
   type: string;
-  data: { object: { id: string; metadata?: Record<string, string> } };
+  data: { object: { id: string; metadata?: Record<string, string>; payment_status?: string } };
 }
 
 const STATUS_BY_EVENT_TYPE: Record<string, TransactionStatus> = {
+  // Deal payments use Checkout: providerRef is the Checkout Session id.
+  'checkout.session.completed': TransactionStatus.COMPLETED,
+  'checkout.session.async_payment_succeeded': TransactionStatus.COMPLETED,
+  'checkout.session.async_payment_failed': TransactionStatus.FAILED,
+  'checkout.session.expired': TransactionStatus.CANCELLED,
   'payment_intent.succeeded': TransactionStatus.COMPLETED,
   'payment_intent.payment_failed': TransactionStatus.FAILED,
   'payment_intent.canceled': TransactionStatus.CANCELLED,
@@ -53,7 +58,13 @@ export class WebhooksService {
     }
 
     const status = STATUS_BY_EVENT_TYPE[event.type];
-    if (status) {
+    // A completed Checkout with a delayed method (bank debit) is not paid yet —
+    // checkout.session.async_payment_succeeded follows when it is.
+    const unpaidCheckout =
+      event.type === 'checkout.session.completed' &&
+      event.data.object.payment_status !== undefined &&
+      event.data.object.payment_status !== 'paid';
+    if (status && !unpaidCheckout) {
       await this.transactionsService.applyProviderStatusUpdate(event.data.object.id, status, {
         eventType: event.type,
       });
